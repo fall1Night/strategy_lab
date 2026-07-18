@@ -2,7 +2,7 @@
 
 > 截至 **2026-07-19**，按模块归类记录本项目累积的所有功能性改动。
 > 详细设计见 `docs/` 下对应文档：使用指南 / 需求文档 / 技术文档 / system_design / src-layout-refactor-design。
-> 版本线：v1.0 基线（策略回测引擎 + CLI + 零依赖网页）→ 存储改造 → 包化重构 → Web 交互增强。
+> 版本线：v1.0 基线（策略回测引擎 + CLI + 零依赖网页）→ 存储改造 → 包化重构 → Web 交互增强 → **v2.0 批量扫描 + 数据仓库化（规划中）**。
 
 ---
 
@@ -79,3 +79,56 @@
 - 更新 `docs/技术文档.md`（模块职责、网页流程、`/api/sector-stocks`、positions 新增字段）。
 - 新建 `docs/system_design.md`（存储改造设计 + v2 落地差异）、`docs/src-layout-refactor-design.md`（包化设计）。
 - 本文件 `docs/CHANGELOG.md`（变更汇总）。
+
+---
+
+## 六、v2.0 大更新（批量扫描 + 数据仓库化）— 规划中（2026-07-19）
+
+> 核心理念：**两页解耦（数据生产 `/production` vs 数据分析 `/analysis`）+ 一次跑多次查**。
+> 用户诉求：从「手动选股 → 单次回测 → 对比」升级为「选策略 → 一键扫描一批股票 → 直观看各股票收益率排名」。
+> 铁律：不引入 Redis/Celery 等重型中间件，仅用 Python 标准库 + 现有 MySQL。
+
+### 13. 数据库迁移 v1→v2（FR-12）
+- 新增 `batches` 表（批次元信息：strategy/params_hash/scope/计数/status/时间戳）。
+- 新增 `batch_items` 表（每只标的状态：symbol/sector_code/status/run_id/is_reused/error）。
+- `backtest_runs` 新增 `params_hash` 字段+索引，老数据回填。
+- `init_db()` 启动时检测 schema 版本，v1 自动迁移到 v2（幂等）。
+
+### 14. 命中复用机制（FR-13/14）
+- `params_hash = sha1(规范化 params)`，调参后 hash 变化视为新 run。
+- 提交批次时预查 `strategy_name + symbol + params_hash`，命中的标 `skipped` 关联已有 run，未命中的入队执行。
+- 回测区间**固定 2020-01-01 ~ 今天**，前端去掉日期选择器。
+
+### 15. 批量扫描后台执行（FR-15/16/17）
+- 新增 `engine/batch_runner.py`：`ThreadPoolExecutor(max_workers=8)` 后台并发；内存 `threading.Event` 取消标志；单只失败不终止整批；原子 SQL 更新计数。
+- `save_run` 改用 `bulk_insert_mappings` 批量写入（快 10-50 倍）。
+- 新增 API：`POST /api/batch`、`GET /api/batch/<id>/progress`、`POST /api/batch/<id>/cancel`、`GET /api/batch`。
+
+### 16. 数据生产页（FR-18）
+- 新增 `/production`：表单（策略+范围，无日期）+ 进度区（2s 轮询）+ 板块总览区（31 板块 ✅/⏳/未跑，策略×板块维度）+ 取消按钮。
+- 范围：按板块 / 自定义池 / 全市场预热。
+
+### 17. 缓存 bug 修复（FR-19）
+- 修复历史 bug：缓存 key 不含区间，换区间会用截断数据。
+- 新增 `<prefix>_meta.json` 记录区间，请求区间⊆缓存区间才复用；`tempfile + os.replace` 原子写。
+
+### 18. 分析查询页与排名（FR-20/21）
+- 新增 `/analysis`：表单（策略+范围，无日期）+ 排名表（股票名+总收益+回撤+夏普，降序分页 50/页）+ 点行进详情。
+- `GET /api/rank` 只返回已落库 run，顶部显示「共 N 只已跑过，还有 M 只未跑」。
+
+### 19. 板块总览与全市场预热（FR-22/23）
+- `GET /api/sector-status` 按「策略×板块」维度聚合返回 31 板块完成状态。
+- `POST /api/batch/warmup-all` 31 板块成分股全部入队，单线程池跑完。
+
+### 20. 导航与服务重启（FR-24/25）
+- 顶部导航栏：首页/快速回测（/）· 数据生产（/production）· 分析查询（/analysis）· 回测历史（/history）。`/` 降级为快速回测。
+- 服务重启：未完成批次标 `interrupted`，可「重新发起（自动复用已完成）」。
+
+### 21. P2 增强（FR-26~31）
+- MySQL 连接池调优、进程内 symbol 锁、老缓存 meta 补建脚本、批次历史 UI、排名导出 CSV、数据时效提示（end 距今>30 天标注「较旧」）。
+
+### 文档同步（v2.0）
+- `docs/需求文档.md`：版本升 v2.0，新增 FR-12~FR-31（P0/P1/P2 分组），更新 §6 范围。
+- `docs/技术文档.md`：版本升 v2.0，新增 §15 v2.0 架构扩展（数据模型/命中复用/API/batch_runner/缓存修复/并发性能/前端两页）。
+- `docs/使用指南.md`：新增 §10.5 v2.0 批量扫描与排名（数据生产页/分析查询页操作说明，大白话）。
+- 本文件追加「六、v2.0 大更新」章节。
