@@ -1,0 +1,84 @@
+%% 存储层类 / ER 图（SQLAlchemy 2.0 ORM）
+classDiagram
+    class DbEngine {
+        +String DATABASE_URL
+        +get_engine() Engine
+        +SessionLocal() sessionmaker
+        +init_db() void
+        +get_session() ContextManager
+    }
+
+    class BacktestRun {
+        +String run_id PK
+        +String batch_id
+        +String strategy_type
+        +String strategy_name
+        +String symbol
+        +String symbol_name
+        +Date start
+        +Date end
+        +Numeric initial_cash
+        +Text params_json
+        +Text positions_json
+        +Text meta_json
+        +DateTime created_at
+    }
+
+    class EquityPoint {
+        +int id PK
+        +String run_id FK
+        +Date date
+        +Numeric value
+    }
+
+    class Trade {
+        +int id PK
+        +String run_id FK
+        +Date entry_date
+        +Date exit_date
+        +String side
+        +String role
+        +String position_id
+        +int size
+        +Numeric entry_price
+        +Numeric exit_price
+        +Numeric pnl
+        +Numeric pnl_pct
+        +int holding_bars
+        +String symbol
+        +String symbol_name
+        +String display_symbol
+        +String label
+    }
+
+    class Summary {
+        +String run_id PK/FK
+        +Numeric total_return_pct
+        +Numeric annual_return_pct
+        +Numeric max_drawdown_pct
+        +Float sharpe
+        +Numeric win_rate_pct
+        +int total_trades
+        +Text meta_json
+    }
+
+    class Repository {
+        +save_run(meta, equity, trades, summary, positions) String
+        +get_run(run_id) dict
+        +list_runs(symbol, strategy, limit) list
+        +list_runs_by_ids(ids) list
+        +delete_run(run_id) void
+    }
+
+    class Serializers {
+        +db_row_to_result(run) dict
+    }
+
+    BacktestRun "1" --> "*" EquityPoint : run_id
+    BacktestRun "1" --> "*" Trade : run_id
+    BacktestRun "1" --> "1" Summary : run_id
+
+    Repository ..> BacktestRun : CRUD
+    Repository ..> DbEngine : session
+    Serializers ..> BacktestRun : 行→result dict
+    Serializers ..> Repository : 供 dashboard/web 复用

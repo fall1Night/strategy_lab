@@ -1,0 +1,43 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# ---- 环境变量 / 密钥 ----
+.env
+.env.*
+!.env.example
+
+# ---- 本地默认 SQLite（切换 MySQL/PG 时不需要提交）----
+*.db
+*.sqlite3
+
+# ---- 运行时生成的数据目录（行情缓存 CSV 等）----
+/data
+data/
+
+# ---- 回测结果「三件套」输出（现已落库，不再写文件）----
+*_equity.csv
+*_trades.csv
+*_summary.json
+
+# ---- 行情输入缓存（data_feed 自动取数生成，可重新拉取，不入库）----
+*_daily.csv
+*_weekly.csv
+
+# ---- 生成的视图/对比报告 HTML ----
+index.html
+*compare*.html
+mysql_compare.html
+
+# ---- 验证残留垃圾文件（临时脚本 / 输出）----
+_*.py
+_*.out
+nul
+
+# ---- 编辑器 / 系统 ----
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,55 @@
+%% 时序图 1：改后 run_symbol 落库流程
+sequenceDiagram
+    actor User
+    participant CLI as run.py / web_app
+    participant BS as engine.backtest.run_symbol
+    participant EX as vendor.export_results
+    participant REP as storage.repository
+    participant DB as Database
+
+    User->>CLI: 提交 (symbols, start, end, strategy)
+    CLI->>BS: run_symbol(cfg, sym, name, start, end, out_dir)
+    BS->>BS: data_feed.normalize_symbol / ensure_data (取数·不变)
+    BS->>BS: strategy.run() → {equity_curve, trade_history, positions} (不变)
+    BS->>EX: export_results(..., write_files=True)
+    EX-->>BS: 写三件套 + 防御校验
+    BS->>BS: _patch_trades_csv() 补 role/position_id (不变)
+    BS->>BS: summary = 读 summary.json (不变)
+    alt DB 可用
+        BS->>REP: save_run(run_meta, equity_curve, trades, summary, positions)
+        REP->>DB: INSERT backtest_runs / equity_points / trades / summary
+        DB-->>REP: run_id
+        REP-->>BS: run_id
+    else DB 不可用 (捕获异常·告警)
+        BS-->>BS: 回退纯文件，run_id=None
+    end
+    BS-->>CLI: {...原有字段..., run_id}
+    CLI-->>User: 返回 / 渲染仪表盘
+
+%% 时序图 2：历史列表 → 选多 run → 对比仪表盘
+sequenceDiagram
+    actor Browser
+    participant WA as web_app.py
+    participant REP as storage.repository
+    participant DB as Database
+    participant DASH as engine.dashboard
+    participant RD as vendor.render_dashboard
+
+    Browser->>WA: GET /history
+    WA-->>Browser: 历史页(多选列表)
+    Browser->>WA: GET /api/runs?symbol=&strategy=&limit=
+    WA->>REP: list_runs(filters)
+    REP->>DB: SELECT 轻量摘要(不含 equity/trades)
+    DB-->>REP: runs[]
+    REP-->>WA: JSON(runs 摘要)
+    WA-->>Browser: 候选列表
+    Browser->>WA: POST /compare {run_ids:[...]}
+    WA->>REP: list_runs_by_ids(run_ids)
+    REP->>DB: 取每个 run 的 equity/trades/summary/positions
+    DB-->>REP: full runs
+    REP-->>WA: runs 数据
+    WA->>DASH: build_compare_from_runs(run_ids, runs)
+    DASH->>DASH: 多权益曲线(rebase 归一化) + 指标对比表 + 各 run 独立 Tab
+    DASH->>RD: render_dashboard(report_data)
+    RD-->>WA: 自包含 HTML
+    WA-->>Browser: 对比仪表盘 (注入「← 新建回测」)

@@ -1,0 +1,62 @@
+# =====================================================================
+# 策略配置：周线 MACD + 日线 KDJ 双入口做 T
+# ---------------------------------------------------------------------
+# 这是「可维护的策略库」中的一条策略。想改参数 / 新增策略，复制本文件
+# 改 [params] 即可，运行时不改任何代码。
+#   - name   : 展示用名称
+#   - type   : 必须对应 engine/strategies/ 下某个策略类的 type 字段
+#   - market : china_a / us_stock / hong_kong
+# 运行示例见 README.md
+# =====================================================================
+
+name = "周线MACD + 日线KDJ 双入口做T"
+type = "kdj_macd_dual_entry"
+market = "china_a"
+description = "周线MACD柱<0进入监控区, 动能筑底转强(路径A:日线J<50 / 路径B:周J<30且转涨)尾盘建底仓; 持仓期用日线J线做T增厚; 日线MACD水上死叉清仓。"
+
+[params]
+initial_cash = 200000          # 初始资金(元)
+base_buy_amount = 100000       # 底仓单笔买入额(元)
+t_buy_amount = 20000           # 做T单笔买入额(元)
+commission = 0.0003            # 佣金(双边, 比例)
+stamp_tax = 0.0005             # 印花税(仅卖方, 比例)
+lot_size = 100                 # A股每手股数
+execution = "same_day_close"   # 执行价: 当日信号+当日收盘(含 look-ahead 偏差)
+
+[params.macd]
+fast = 12
+slow = 26
+signal = 9
+
+[params.kdj]
+n = 9
+m1 = 3
+m2 = 3
+
+# ---- 建仓: 两条平行入口, 同一时间仅持有一笔底仓 ----
+[params.entry.path_a]
+enabled = true
+armed_hist_below_zero = true   # 周线MACD柱(hist)<0 才进入监控区
+armed_hist_rising = true       # 某一周 hist 较上周上涨(动能筑底转强)才 armed
+disarm_hist_above_zero = true  # hist 回到 0 轴上方自动解除监控
+j_buy = 50                     # 当日线 J < 此值 尾盘买入底仓
+
+[params.entry.path_b]
+enabled = true
+hist_below_zero = true         # 周线 hist < 0
+j_below = 30                   # 周线 J < 30
+j_rising = true                # 本周周J 较上周 J 上涨
+skip_daily_j = true            # 不卡日线J(直接尾盘买入底仓)
+
+# ---- 做T: 仅看日线 KDJ 的 J 线 ----
+[params.t_trade]
+drop_from_high = 30            # J 较近5日高点回落 >= 此值 且仍在下降 -> 买1W
+j_sell_threshold = 80          # J > 此值 -> 卖光全部加仓部分(底仓不动)
+
+# ---- 清仓 ----
+[params.exit]
+daily_macd_water_death_cross = true  # 日线MACD水上死叉(DIF>0,DEA>0,DIF下穿DEA)清仓
+
+# ---- 风控: 同一时间只持一笔底仓 ----
+[params.single_base_position]
+enabled = true

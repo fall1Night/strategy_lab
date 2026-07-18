@@ -1,0 +1,123 @@
+classDiagram
+    direction LR
+
+    class StrategylabPackage {
+        <<公共 API>>
+        +run_symbol()
+        +build_compare_dashboard()
+        +build_compare_from_runs()
+        +load_strategy()
+        +load_strategy_by_arg()
+        +list_available_strategies()
+        +list_strategies()
+        +get_strategy_class()
+        +search_a_stocks()
+        +init_db()
+        +list_runs() / get_run() / save_run() / delete_run()
+    }
+
+    class Cli {
+        +main()
+        -resolve_strategy(arg)
+        -print_summary(results)
+        -print_db_runs()
+    }
+    class Web {
+        +main()
+        +run_backtest(symbols, start, end, strategy)
+        +build_form_html()
+        +build_history_html()
+        Handler.do_GET() / do_POST()
+    }
+    class MainModule {
+        <<python -m strategylab>>
+        +main()
+    }
+    class Settings {
+        +load_dotenv()
+        +get_data_dir() Path
+        +get_strategies_dir() Path
+    }
+    class LoggingConfig {
+        +setup_logging()
+    }
+
+    class EngineBacktest {
+        +run_symbol(cfg, symbol, name, start, end, out_dir, batch_id) dict
+    }
+    class EngineDashboard {
+        +build_compare_dashboard()
+        +build_compare_from_runs()
+    }
+    class EngineConfig {
+        +load_strategy(path) dict
+        +load_strategy_by_arg(arg) dict
+        +list_available_strategies() list
+    }
+    class EngineStorage {
+        <<storage 包>>
+        +init_db() / get_engine() / get_session()
+        +repository.save_run/get_run/list_runs/list_runs_by_ids/delete_run
+        +db_row_to_result()
+    }
+    class EngineStrategies {
+        <<strategies 包>>
+        +list_strategies()
+        +get_strategy_class(type)
+        +STRATEGY_REGISTRY
+    }
+    class EngineVendor {
+        <<vendor 包>>
+        +render_dashboard()  (importlib.resources 读模板)
+        +export_results(write_files=False)
+        +dashboard_locales
+    }
+    class EngineDataFeed {
+        +ensure_data()  (写 out_dir CSV 缓存)
+        +normalize_symbol()
+        +load_bars()
+    }
+    class EngineIndicators {
+        +compute_macd()
+        +compute_kdj()
+    }
+    class EngineSearch {
+        +search_a_stocks()
+    }
+
+    class ResourceStrategies {
+        <<resources/strategies>>
+        kdj_macd_dual_entry.toml
+    }
+    class VendorTemplate {
+        <<engine/vendor>>
+        dashboard_template.html
+    }
+
+    StrategylabPackage ..> Cli : 暴露
+    StrategylabPackage ..> Web : 暴露
+    MainModule ..> Cli : 调用 main()
+
+    Cli ..> Settings : get_data_dir()
+    Web ..> Settings : get_data_dir()
+    Cli ..> LoggingConfig : setup_logging()
+    Web ..> LoggingConfig : setup_logging()
+    StrategylabPackage ..> Settings : load_dotenv()
+    StrategylabPackage ..> LoggingConfig : setup_logging()
+
+    Cli ..> EngineConfig : load_strategy_by_arg()
+    Cli ..> EngineBacktest : run_symbol()
+    Web ..> EngineConfig : load_strategy_by_arg()
+    Web ..> EngineBacktest : run_symbol()
+    Web ..> EngineDashboard : build_compare_from_runs()
+
+    EngineBacktest ..> EngineDataFeed : ensure_data()
+    EngineBacktest ..> EngineStrategies : get_strategy_class()
+    EngineBacktest ..> EngineVendor : export_results()
+    EngineBacktest ..> EngineStorage : save_run()
+
+    EngineStrategies ..> EngineIndicators : compute_macd/compute_kdj
+    EngineDashboard ..> EngineVendor : render_dashboard()
+
+    EngineConfig ..> ResourceStrategies : importlib.resources 读取
+    EngineVendor ..> VendorTemplate : importlib.resources 读取

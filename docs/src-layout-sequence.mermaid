@@ -1,0 +1,66 @@
+sequenceDiagram
+    autonumber
+    participant U as 用户/Shell
+    participant M as __main__.py
+    participant CLI as cli.py (strategylab)
+    participant SET as settings.py
+    participant CFG as engine.config
+    participant BT as engine.backtest
+    participant DF as engine.data_feed
+    participant ST as engine.strategies
+    participant EX as engine.vendor.export_results
+    participant REPO as engine.storage.repository
+    participant DASH as engine.dashboard
+    participant DD as engine.vendor.render_dashboard
+    participant WEB as web.py (strategylab-web)
+
+    Note over U,WEB: 一、CLI 跑回测（含 python -m strategylab）
+    U->>M: python -m strategylab --symbols X --start S --end E
+    M->>CLI: main()
+    CLI->>SET: get_data_dir()  (STRATEGALAB_DATA_DIR，默认 ./data)
+    SET-->>CLI: data_dir
+    CLI->>CFG: load_strategy_by_arg(strategy)
+    CFG-->>CLI: cfg dict  (内置资源 / 用户目录 / 文件路径)
+    loop 每个标的
+        CLI->>BT: run_symbol(cfg, sym, name, S, E, out_dir=data_dir, batch_id)
+        BT->>DF: ensure_data(sym_cfg, out_dir)
+        DF-->>BT: daily_csv / weekly_csv  (缓存复用或联网取数)
+        BT->>ST: get_strategy_class(cfg.type) → run(daily, weekly, ...)
+        ST-->>BT: equity_curve / trade_history / positions
+        BT->>EX: export_results(write_files=False)
+        EX-->>BT: summary_data / meta
+        BT->>REPO: save_run(meta, equity, trades, summary, positions)
+        REPO-->>BT: run_id
+        BT-->>CLI: result dict (含 run_id)
+    end
+    CLI->>DASH: build_compare_dashboard(results, cfg, out_html, S, E)
+    DASH->>DD: render_dashboard(report_data, output_path)
+    DD-->>DASH: index.html  (模板经 importlib.resources 读取)
+    DASH-->>CLI: index.html
+    CLI-->>U: 打印 summary + index.html 路径
+
+    Note over U,WEB: 二、Web 跑回测（strategylab-web）
+    U->>WEB: 浏览器打开 http://host:PORT 提交表单
+    WEB->>SET: get_data_dir()
+    WEB->>CFG: load_strategy_by_arg(strategy)
+    loop 每个标的
+        WEB->>BT: run_symbol(cfg, sym, None, S, E, out_dir=data_dir, batch_id)
+        BT->>DF: ensure_data(...)
+        BT->>ST: run(...)
+        BT->>EX: export_results(write_files=False)
+        BT->>REPO: save_run(...)
+        BT-->>WEB: result dict
+    end
+    WEB->>DASH: build_compare_dashboard(...)
+    DASH->>DD: render_dashboard(...)
+    DD-->>WEB: html
+    WEB-->>U: 注入「← 新建回测」按钮后返回自包含 HTML
+
+    Note over U,WEB: 三、跨回测对比（/compare 或未来 CLI）
+    U->>WEB: POST /compare {run_ids:[...]}
+    WEB->>DASH: build_compare_from_runs(run_ids)
+    DASH->>REPO: list_runs_by_ids(run_ids)  +  db_row_to_result
+    REPO-->>DASH: results (权益曲线 rebased 到 100)
+    DASH->>DD: render_dashboard(report_data, tmp_path)
+    DD-->>WEB: html
+    WEB-->>U: 返回对比 HTML
