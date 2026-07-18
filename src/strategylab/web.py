@@ -122,6 +122,7 @@ def build_form_html() -> str:
   var box=document.getElementById('sym-suggest');
   var timer=null;
   var _stockMap = {};
+  window._stockMap = _stockMap;  // 立即暴露，让板块 JS 可以直接读写
   function lastTok(v){ var p=v.split(/[,\\s]+/); return p[p.length-1]||''; }
   function hl(text,q){
     if(!q) return text;
@@ -207,20 +208,30 @@ function toggleChip(el){
   syncSectorSelections();
 }
 function syncSectorSelections(){
-  var inp=document.getElementById('symbols'),names=[];
+  var inp=document.getElementById('symbols');
+  var sectorNames=Object.values(_sectorSelections);
   var ex=inp.value.split(/[,\\s]+/).filter(Boolean);
-  ex.forEach(function(n){ if(!_sectorSelections[n]) names.push(n); });
-  Object.keys(_sectorSelections).forEach(function(c){
-    names.push(_sectorSelections[c]);
-    if(window._stockMap) window._stockMap[_sectorSelections[c]]=c;
-  });
+  var seen={}; sectorNames.forEach(function(n){ seen[n]=true; });
+  var names=ex.filter(function(n){ return !seen[n]; }).concat(sectorNames);
   inp.value=names.join(', ')+', ';
+  Object.keys(_sectorSelections).forEach(function(c){
+    window._stockMap[_sectorSelections[c]]=c;
+  });
   if(typeof window.updateHidden==="function") window.updateHidden();
 }
 document.getElementById('sector-sel').addEventListener('change',function(){
   Object.keys(_sectorSelections).forEach(function(k){delete _sectorSelections[k];});
   loadSectorStocks(this.value);
 });
+function clearSectorSelections(){
+  Object.keys(_sectorSelections).forEach(function(k){delete _sectorSelections[k];});
+  var inp=document.getElementById('symbols');
+  inp.value='';
+  document.getElementById('real-symbols').value='';
+  document.getElementById('real-names').value='';
+  var sel=document.getElementById('sector-sel');
+  if(sel.value) loadSectorStocks(sel.value);
+}
 """
 
     return f"""<!doctype html>
@@ -309,6 +320,7 @@ document.getElementById('sector-sel').addEventListener('change',function(){
           <option value="">-- 按板块选股 --</option>
 {sector_opts}
         </select>
+        <button type="button" id="clear-sector-btn" style="margin-left:8px;padding:4px 12px;font-size:12px;background:#475569;color:#cbd5e1;border:1px solid #64748b;border-radius:6px;cursor:pointer;" onclick="clearSectorSelections()">✕ 全清</button>
         <div id="sector-stocks" class="chip-panel"><span class="empty">👆 请先在上方选择一个板块</span></div>
 
         <div class="row">
@@ -559,6 +571,9 @@ class Handler(BaseHTTPRequestHandler):
         data = urllib.parse.parse_qs(raw)
         symbols_raw = (data.get("symbols", [""])[0] or "").strip()
         symbols = [s for s in re.split(r"[,\s]+", symbols_raw) if s]
+        # 防御：过滤掉含中文的「伪代码」（说明前端 _stockMap 映射失败）
+        if any(re.search(r"[\u4e00-\u9fff]", s) for s in symbols):
+            raise ValueError("标的代码包含中文，请通过搜索框或板块面板重新选股。提示：选中板块芯片后务必确认已点「运行回测」前页面刷新完毕。")
         names_raw = (data.get("names", [""])[0] or "").strip()
         names = [n for n in re.split(r"[,\s]+", names_raw) if n]
         start = (data.get("start", ["2023-07-18"])[0] or "2023-07-18").strip()

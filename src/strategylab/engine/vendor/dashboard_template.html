@@ -655,17 +655,21 @@
       text-align: left;
       white-space: nowrap;
     }
-    .trades-table td {
+    .trades-table td,
+    .position-table td {
       font-size: 14px;
       font-weight: 500;
       color: var(--text-strong);
     }
     .trades-table td.num,
-    .trades-table th.num {
+    .trades-table th.num,
+    .position-table td.num,
+    .position-table th.num {
       text-align: right;
       font-variant-numeric: tabular-nums;
     }
-    .trades-table thead th {
+    .trades-table thead th,
+    .position-table thead th {
       color: var(--muted);
       font-size: 12px;
       text-transform: none;
@@ -676,15 +680,39 @@
       font-weight: 500;
       border-bottom: 1px solid var(--border);
     }
-    .trades-table tbody tr { transition: background 0.12s ease; }
-    .trades-table tbody tr:hover { background: var(--hover); }
-    .trades-table tbody tr:last-child td { border-bottom: 0; }
+    .trades-table tbody tr,
+    .position-table tbody tr { transition: background 0.12s ease; }
+    .trades-table tbody tr:hover,
+    .position-table tbody tr:hover { background: var(--hover); }
+    .trades-table tbody tr:last-child td,
+    .position-table tbody tr:last-child td { border-bottom: 0; }
 
     /* merged position table: 建仓→清仓合并为一行, 做T作为缩进子行 */
-    .trades-table tr.pos-main td { font-weight: 600; }
-    .trades-table tr.pos-main { background: color-mix(in srgb, var(--accent) 5%, transparent); }
-    .trades-table tr.pos-sub td { color: var(--muted); font-size: 13px; }
-    .trades-table tr.pos-sub td:first-child { padding-left: 34px; }
+    .trades-table tr.pos-main td,
+    .position-table tr.pos-main td { font-weight: 600; }
+    .trades-table tr.pos-main,
+    .position-table tr.pos-main { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+    .trades-table tr.pos-sub td,
+    .position-table tr.pos-sub td { color: var(--muted); font-size: 13px; }
+    .trades-table tr.pos-sub td:first-child,
+    .position-table tr.pos-sub td:first-child { padding-left: 34px; }
+
+    /* ===== 持仓明细表格：独立于 trades-table，自适应容器宽度，消除横向滚动条 ===== */
+    .position-table-wrap { overflow-x: hidden; }
+    .position-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-feature-settings: 'tnum';
+    }
+    /* 单元格允许换行 + 收紧 padding，避免 14 列被长内容/长表头撑宽；不设 min-width 以自适应容器 */
+    .position-table th,
+    .position-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      white-space: normal;
+      word-break: break-word;
+    }
     .pos-badge {
       display: inline-flex; align-items: center; gap: 6px;
       font-weight: 700; color: var(--text-strong);
@@ -1326,7 +1354,7 @@
         return (
           '<article class="module ' + span + '" data-module="' + idx + '">' +
             titleHtml +
-            '<div class="trades-table-wrap"><table class="trades-table"><thead><tr>' +
+            '<div class="position-table-wrap"><table class="position-table"><thead><tr>' +
               cols.map(function (c) { return '<th>' + escapeHtml(c) + '</th>'; }).join('') +
             '</tr></thead><tbody>' + body + '</tbody></table></div>' +
           '</article>'
