@@ -283,6 +283,7 @@ function clearSectorSelections(){
   .sidebar .rval.pos {{ color: #4ade80; }}
   .sidebar .rval.neg {{ color: #f87171; }}
   .sidebar .empty {{ color: #64748b; font-size: 11px; }}
+  .sidebar .gtime {{ color:#64748b; font-size:11px; margin:0 0 6px; padding-left:2px; }}
   .main {{ flex: 1; min-width: 0; }}
   .chip-panel {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; max-height: 220px; min-height: 40px; overflow-y: auto; border: 1px dashed #334155; border-radius: 8px; padding: 8px; }}
   .chip-panel .chip {{ font-size: 12px; padding: 4px 10px; border-radius: 14px; cursor: pointer; border: 1px solid #475569; background: #0f172a; color: #94a3b8; transition: .15s; user-select: none; }}
@@ -360,7 +361,34 @@ function clearSectorSelections(){
 {autocomplete_js}
 <script>
 function fmt(v,s){{if(v==null)return'--';var p=v>=0?'+':'';return p+v.toFixed(2)+s;}}
-function loadSidebar(){{fetch('/api/runs?limit=100').then(function(r){{return r.json();}}).then(function(d){{var runs=d.runs||[];var byName={{}};runs.forEach(function(r){{var k=r.symbol_name||r.symbol;if(!byName[k])byName[k]=[];byName[k].push(r);}});var h='';var keys=Object.keys(byName).sort();if(!keys.length){{h='<div class=empty>暂无历史</div>';}}keys.forEach(function(k){{h+='<div class=group><div class=gname>'+k+'</div>';byName[k].forEach(function(r){{var c=(r.total_return_pct||0)>=0?'pos':'neg';h+='<div class=rec onclick="location.href=\\'/history\\'" title="'+r.start+'~'+r.end+'"><span>'+r.strategy_name+'</span><span class=rval '+c+'>'+fmt(r.total_return_pct,'%')+'</span></div>';}});h+='</div>';}});document.getElementById('sidebar-list').innerHTML=h;}}).catch(function(){{document.getElementById('sidebar-list').innerHTML='<div class=empty>加载失败</div>';}});}}
+function loadSidebar(){{fetch('/api/runs?limit=100').then(function(r){{return r.json();}}).then(function(d){{
+  var runs=d.runs||[];
+  var byStrat={{}};
+  runs.forEach(function(r){{
+    var sk=r.strategy_name||'未命名策略';
+    if(!byStrat[sk]){{ byStrat[sk]={{runs:[],repStart:null,repEnd:null}}; }}
+    byStrat[sk].runs.push(r);
+    if(byStrat[sk].repStart===null){{ byStrat[sk].repStart=r.start; byStrat[sk].repEnd=r.end; }}
+  }});
+  var h='';
+  var keys=Object.keys(byStrat).sort();
+  if(!keys.length){{ h='<div class=empty>暂无历史</div>'; }}
+  keys.forEach(function(sk){{
+    var g=byStrat[sk];
+    var time=(g.repStart&&g.repEnd)?(g.repStart+' ~ '+g.repEnd):'';
+    h+='<div class="group"><div class="gname">'+sk+'</div>';
+    if(time){{ h+='<div class="gtime">'+time+'</div>'; }}
+    g.runs.forEach(function(r){{
+      var nm=r.symbol_name||r.symbol||'—';
+      var c=(r.total_return_pct||0)>=0?'pos':'neg';
+      h+='<div class="rec" onclick="location.href=\\'/history\\'" title="'+(r.start||'')+' ~ '+(r.end||'')+'">'
+        +'<span>'+nm+'</span>'
+        +'<span class="rval '+c+'">'+fmt(r.total_return_pct,'%')+'</span></div>';
+    }});
+    h+='</div>';
+  }});
+  document.getElementById('sidebar-list').innerHTML=h;
+}}).catch(function(){{document.getElementById('sidebar-list').innerHTML='<div class=empty>加载失败</div>';}});}}
 window.addEventListener('DOMContentLoaded',loadSidebar);
 {sector_js}
 
