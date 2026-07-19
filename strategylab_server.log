@@ -1,0 +1,2 @@
+2026-07-19 08:52:08,159 [INFO] strategylab.engine.batch_runner: 重启处理：1 个 running 批次标记为 interrupted，5396 个 item 标记为 cancelled
+2026-07-19 08:52:08,163 [INFO] __main__: 量化回测服务已启动 → http://localhost:8000 (Ctrl+C 停止)

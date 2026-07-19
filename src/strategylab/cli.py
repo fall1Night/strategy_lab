@@ -77,6 +77,16 @@ def main() -> None:
         ap.print_help()
         return
 
+    # ---- datasource status 子命令（极薄分发，不破坏现有 argparse） ----
+    if len(sys.argv) >= 2 and sys.argv[1] == "datasource":
+        if len(sys.argv) >= 3 and sys.argv[2] == "status":
+            from .engine.datasource.cli_status import cmd_status
+            print(cmd_status())
+            return
+        else:
+            logger.info("用法: strategylab datasource status")
+            return
+
     args = ap.parse_args()
 
     if args.list_strategies:

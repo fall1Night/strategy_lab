@@ -2,17 +2,20 @@
 """量化回测 Web 服务（零依赖，仅用 Python 标准库）。
 
 浏览器打开 http://localhost:8000 后：
-  - 标的输入框支持「联网实时模糊搜索」：输入名称/代码（如「浙江」「600216」）即弹出下拉候选，点击填入；可多选
+  - 标的输入框支持「联网实时模糊搜索」
   - 选择「评估起止日期」
-  - 选择「策略」（下拉，读取 strategies/ 下所有 .toml）
+  - 选择「策略」
   - 点「运行回测」→ 后端跑同一套 engine，返回「策略对比」排版仪表盘
 
+v2.0 新增（批量扫描 + 数据仓库化）：
+  - /production  数据生产页（批量提交 + 进度 + 板块总览 + 历史批次）
+  - /analysis    分析查询页（排名表 + 点行进详情）
+  - /api/batch*  批次提交 / 进度 / 取消 / 列表 / 全市场预热
+  - /api/rank    排名查询（命中复用 + 分页 + 排序）
+  - /api/sector-status  跨批次板块状态总览
+  - 顶部导航栏（四页共存）；/history 支持 ?run_id= 直接打开单 run 详情
+
 实现：标准库 http.server + ThreadingHTTPServer。
-  GET  /           表单页
-  GET  /api/search 标的实时搜索（?q=关键词 → JSON {items:[{code,name,symbol}]}）
-  POST /run        解析表单 → run_symbol + build_compare_dashboard → 返回自包含仪表盘 HTML
-仪表盘 HTML 为自包含单文件（内联 JS / report-data / SVG），可直接渲染；
-本服务在返回前注入一个浮层「← 新建回测」按钮，方便回到表单。
 """
 from __future__ import annotations
 
@@ -30,12 +33,35 @@ from .engine.backtest import run_symbol
 from .engine.dashboard import build_compare_dashboard, build_compare_from_runs
 from .engine.vendor.render_dashboard import render_dashboard
 from .engine.search import search_a_stocks
+from .engine import batch_runner
 from .engine.storage import repository as storage_repo
+from .engine.storage.repository import compute_params_hash
 from .settings import get_data_dir
 
 logger = logging.getLogger(__name__)
 
 PORT = int(os.environ.get("PORT", "8000"))
+
+
+# --------------------------------------------------------------------------
+# 顶部导航（所有页面统一注入）
+# --------------------------------------------------------------------------
+NAV_HTML = """
+<nav class="topnav">
+  <span class="brand">📊 Strategy Lab</span>
+  <a href="/">首页 / 快速回测</a>
+  <a href="/production">数据生产</a>
+  <a href="/analysis">分析查询</a>
+  <a href="/history">回测历史</a>
+</nav>
+"""
+
+NAV_CSS = """
+.topnav { display:flex; align-items:center; gap:6px; padding:10px 18px; background:#0f172a; border-bottom:1px solid #334155; position:sticky; top:0; z-index:200; flex-wrap:wrap; }
+.topnav .brand { color:#fbbf24; font-weight:700; margin-right:12px; font-size:15px; }
+.topnav a { color:#cbd5e1; text-decoration:none; padding:7px 13px; border-radius:7px; font-size:13px; }
+.topnav a:hover { background:#1e293b; color:#fff; }
+"""
 
 
 # --------------------------------------------------------------------------
@@ -56,10 +82,7 @@ def _resolve_strategy(arg: str | None) -> dict:
 # --------------------------------------------------------------------------
 def run_backtest(symbols: list[str], start: str, end: str, strategy_arg: str,
                  names: list[str] | None = None) -> str:
-    """跑回测，写 index.html（渲染视图）到 data/ 目录，返回其 HTML 文本。
-
-    回测结果已落库（run_symbol 内部完成），index.html 仅作渲染视图。
-    """
+    """跑回测，写 index.html（渲染视图）到 data/ 目录，返回其 HTML 文本。"""
     import uuid
 
     cfg = _resolve_strategy(strategy_arg)
@@ -91,7 +114,7 @@ def inject_back_button(html: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# 页面
+# 页面：首页 / 快速回测
 # --------------------------------------------------------------------------
 def build_form_html() -> str:
     today = datetime.date.today().strftime("%Y-%m-%d")
@@ -122,7 +145,7 @@ def build_form_html() -> str:
   var box=document.getElementById('sym-suggest');
   var timer=null;
   var _stockMap = {};
-  window._stockMap = _stockMap;  // 立即暴露，让板块 JS 可以直接读写
+  window._stockMap = _stockMap;
   function lastTok(v){ var p=v.split(/[,\\s]+/); return p[p.length-1]||''; }
   function hl(text,q){
     if(!q) return text;
@@ -280,8 +303,8 @@ function clearSectorSelections(){
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; justify-content: space-between; }}
   .sidebar .rec:hover {{ background: #2d3a4a; color: #e2e8f0; }}
   .sidebar .rval {{ font-size: 11px; }}
-  .sidebar .rval.pos {{ color: #4ade80; }}
-  .sidebar .rval.neg {{ color: #f87171; }}
+  .sidebar .rval.pos {{ color: #f87171; }}
+  .sidebar .rval.neg {{ color: #4ade80; }}
   .sidebar .empty {{ color: #64748b; font-size: 11px; }}
   .sidebar .gtime {{ color:#64748b; font-size:11px; margin:0 0 6px; padding-left:2px; }}
   .main {{ flex: 1; min-width: 0; }}
@@ -290,9 +313,11 @@ function clearSectorSelections(){
   .chip-panel .chip:hover {{ border-color: #1f6feb; color: #e2e8f0; }}
   .chip-panel .chip.on {{ background: #1f6feb; border-color: #1f6feb; color: #fff; }}
   .chip-panel .empty {{ color: #64748b; font-size: 12px; padding: 6px 0; }}
-{extra_css}</style>
+{extra_css}
+{NAV_CSS}</style>
 </head>
 <body>
+{NAV_HTML}
 <div class="layout">
   <aside class="sidebar">
     <h2>📋 回测历史</h2>
@@ -409,7 +434,7 @@ function setDateRange(years, btn) {{
 
 def build_history_html() -> str:
     """回测历史页：多选列表（调 /api/runs）+ 一键跨回测对比（POST /compare）。"""
-    return """<!doctype html>
+    html = """<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -431,6 +456,8 @@ def build_history_html() -> str:
   .row.head { background:#172033; color:#93c5fd; font-weight:700; }
   .row:hover { background:#172033; }
   .tag { color:#64748b; font-size:12px; }
+  .pos { color:#f87171; }
+  .neg { color:#4ade80; }
   .empty { padding:30px; text-align:center; color:#64748b; }
   code { background:#0f172a; padding:1px 6px; border-radius:5px; color:#93c5fd; font-size:12px; }
   a { color:#93c5fd; }
@@ -450,7 +477,7 @@ def build_history_html() -> str:
       <div class="row head"><div></div><div>标的</div><div>策略</div><div>区间</div><div>总收益</div><div>Sharpe</div></div>
       <div class="empty">加载中…</div>
     </div>
-    <p class="sub" style="margin-top:18px"><a href="/">← 返回新建回测</a></p>
+    <p class="sub" style="margin-top:18px"><a href="/">← 返回新建回测</a> · <a href="/production">数据生产</a> · <a href="/analysis">分析查询</a></p>
   </div>
 <script>
 function fmt(v,s){ if(v===null||v===undefined||v==='') return '--'; return Number(v).toFixed(2)+(s||''); }
@@ -470,7 +497,7 @@ function render(runs){
       +'<div>'+r.symbol_name+'</div>'
       +'<div>'+r.strategy_name+'</div>'
       +'<div class="tag">'+r.start+'~'+r.end+'</div>'
-      +'<div>'+fmt(r.total_return_pct,'%')+'</div>'
+      +'<div class="'+(r.total_return_pct>=0?'pos':'neg')+'">'+fmt(r.total_return_pct,'%')+'</div>'
       +'<div>'+fmt(r.sharpe)+'</div></label>';
   });
   box.innerHTML=html;
@@ -489,6 +516,394 @@ load();
 </script>
 </body>
 </html>"""
+    return (
+        html.replace("<body>", "<body>\n" + NAV_HTML, 1)
+        .replace("</style>", NAV_CSS + "\n</style>", 1)
+    )
+
+
+def build_production_html() -> str:
+    """数据生产页 /production：表单 + 进度 + 板块总览 + 历史批次。无日期选择器。"""
+    strat_opts = "\n".join(
+        f'          <option value="{fname}">{name}</option>' for name, fname in list_strategy_options()
+    )
+    import json as _json, pathlib
+    _sec_path = pathlib.Path("data/sectors.json")
+    _sectors = _json.loads(_sec_path.read_text(encoding="utf-8")) if _sec_path.exists() else []
+    sector_opts = "\n".join(
+        f'            <option value="{s["code"]}">{s["name"]}</option>' for s in _sectors
+    )
+
+    template = """<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据生产 · Strategy Lab</title>
+<style>
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:linear-gradient(160deg,#0f172a,#1e293b); color:#e2e8f0; min-height:100vh; }
+  .wrap { max-width:880px; margin:0 auto; padding:28px 20px 64px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .sub { color:#94a3b8; margin:0 0 18px; font-size:14px; }
+  .card { background:#1e293b; border:1px solid #334155; border-radius:14px; padding:22px 22px; margin-bottom:18px;
+          box-shadow:0 10px 30px rgba(0,0,0,.35); }
+  label { display:block; font-size:13px; color:#cbd5e1; margin:16px 0 8px; font-weight:600; }
+  input, select, textarea { width:100%; padding:11px 13px; border-radius:9px; border:1px solid #475569;
+          background:#0f172a; color:#e2e8f0; font-size:14px; outline:none; }
+  input:focus, select:focus, textarea:focus { border-color:#1f6feb; }
+  button { margin-top:16px; padding:12px 16px; border:0; border-radius:10px; cursor:pointer;
+           background:linear-gradient(90deg,#1f6feb,#3b82f6); color:#fff; font-size:14px; font-weight:700; }
+  button:hover { filter:brightness(1.08); }
+  button.ghost { background:#334155; font-weight:500; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .hint { font-size:12px; color:#64748b; margin-top:6px; }
+  .scope-row { display:flex; gap:18px; align-items:center; margin:10px 0; }
+  .scope-row label { margin:0; font-weight:500; }
+  .prog { margin-top:14px; }
+  .bar-bg { height:18px; background:#0f172a; border-radius:9px; overflow:hidden; border:1px solid #334155; }
+  .bar-fg { height:100%; width:0%; background:linear-gradient(90deg,#22c55e,#3b82f6); transition:width .4s; }
+  .stats { display:flex; gap:18px; flex-wrap:wrap; margin-top:12px; font-size:13px; }
+  .stats b { color:#fbbf24; }
+  .sectors { display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:10px; }
+  .sec { font-size:12px; color:#cbd5e1; }
+  .btab { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+  .btab th, .btab td { border-bottom:1px solid #1e293b; padding:7px 8px; text-align:left; }
+  .btab th { color:#93c5fd; }
+  .empty { color:#64748b; font-size:13px; padding:8px 0; }
+  details { background:#1e293b; border:1px solid #334155; border-radius:12px; padding:12px 16px; margin-bottom:18px; }
+  summary { cursor:pointer; font-weight:600; color:#e2e8f0; }
+  code { background:#0f172a; padding:1px 6px; border-radius:5px; color:#93c5fd; font-size:12px; }
+  .note { background:#0f172a; border:1px solid #334155; border-radius:9px; padding:10px 12px; margin-top:12px; font-size:13px; color:#cbd5e1; }
+__NAV_CSS__</style>
+</head>
+<body>
+__NAV_HTML__
+<div class="wrap">
+  <h1>🏭 数据生产</h1>
+  <p class="sub">选策略 + 选范围（板块 / 自定义池 / 全市场），一键批量扫描。回测区间固定 <code>2020-01-01 ~ 今天</code>。</p>
+
+  <div class="card">
+    <label for="strategy">策略</label>
+    <select id="strategy">
+__STRAT_OPTS__
+    </select>
+
+    <div class="scope-row">
+      <label><input type="radio" name="scope" value="sector" checked> 按板块</label>
+      <label><input type="radio" name="scope" value="pool"> 自定义池</label>
+    </div>
+
+    <div id="scope-sector">
+      <label for="sector-multi">选择板块（可多选，Ctrl/⌘ 多选）</label>
+      <select id="sector-multi" multiple size="8">
+__SECTOR_OPTS__
+      </select>
+      <div class="hint">所选板块的全部成分股将纳入本次批量扫描；跨板块去重。</div>
+    </div>
+
+    <div id="scope-pool" style="display:none">
+      <label for="pool-symbols">自定义池（代码逗号/空格分隔，如 <code>600216.SH,000001.SZ</code>）</label>
+      <textarea id="pool-symbols" rows="4" placeholder="600216.SH, 000001.SZ"></textarea>
+    </div>
+
+    <button type="button" onclick="submitForm()">提交批量扫描</button>
+    <button type="button" class="ghost" onclick="warmupAll()">🌐 全市场预热（逐板块）</button>
+  </div>
+
+  <div class="card" id="batch-info" style="display:none">
+    <h3 style="margin:0 0 4px">批次进度</h3>
+    <div class="hint">批次 ID：<code id="batch-id"></code> · 命中复用 <b id="batch-hit">0</b> / 共 <b id="batch-total">0</b> 只</div>
+    <div class="prog">
+      <div class="bar-bg"><div class="bar-fg" id="prog-bar"></div></div>
+      <div class="stats">
+        <span>进度：<b id="prog-pct">0%</b></span>
+        <span>已完成：<b id="prog-done">0</b></span>
+        <span>失败：<b id="prog-failed">0</b></span>
+        <span>跳过(复用)：<b id="prog-skipped">0</b></span>
+        <span>总数：<b id="prog-total">0</b></span>
+        <span>当前标的：<b id="prog-current">—</b></span>
+        <span>状态：<b id="prog-status">—</b></span>
+        <span>预计剩余：<b id="prog-eta">—</b></span>
+      </div>
+    </div>
+    <button type="button" class="ghost" onclick="cancelBatch()">取消批次</button>
+    <div class="note" id="prog-done-msg" style="display:none">
+      ✅ 批次已完成。前往 <a href="/analysis">分析查询页</a> 查看收益排名。
+    </div>
+    <div class="note" id="reinit-note" style="display:none">
+      ⚠️ 该批次因服务重启被标记为 <b>interrupted</b>。重新提交相同策略+范围即可自动复用已完成部分。
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 6px">板块完成总览</h3>
+    <div class="hint">跨批次（策略×板块维度）：✅ 已完成 · ⏳ 进行中/部分 · — 未跑</div>
+    <div class="sectors" id="sector-overview"><span class="empty">加载中…</span></div>
+  </div>
+
+  <details>
+    <summary>📦 历史批次（点击展开）</summary>
+    <div id="batch-history"><span class="empty">加载中…</span></div>
+  </details>
+</div>
+<script>
+var curBatchId=null, pollTimer=null;
+function fmtEta(s){ if(s==null) return '—'; s=Math.round(s); var m=Math.floor(s/60); var sec=s%60; return (m>0?m+'分':'')+sec+'秒'; }
+function switchScope(){
+  var scope=document.querySelector('input[name=scope]:checked').value;
+  document.getElementById('scope-sector').style.display = scope==='sector'?'block':'none';
+  document.getElementById('scope-pool').style.display = scope==='pool'?'block':'none';
+}
+Array.prototype.forEach.call(document.querySelectorAll('input[name=scope]'),function(r){ r.addEventListener('change',switchScope); });
+
+function submitForm(){
+  var fd=new FormData();
+  fd.append('strategy', document.getElementById('strategy').value);
+  var scope=document.querySelector('input[name=scope]:checked').value;
+  if(scope==='sector'){
+    var sel=document.getElementById('sector-multi');
+    var codes=Array.prototype.map.call(sel.selectedOptions,function(o){return o.value;});
+    if(!codes.length){ alert('请至少选择一个板块'); return; }
+    fd.append('scope_type','sector'); fd.append('scope_value', codes.join(','));
+  } else if(scope==='pool'){
+    var sym=document.getElementById('pool-symbols').value.trim();
+    if(!sym){ alert('请填写自定义池标的'); return; }
+    fd.append('scope_type','pool'); fd.append('symbols', sym);
+  } else { return; }
+  startBatch(fd);
+}
+function warmupAll(){
+  var fd=new FormData();
+  fd.append('strategy', document.getElementById('strategy').value);
+  fetch('/api/batch/warmup-all',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
+    if(d.error){ alert(d.error); return; }
+    beginBatch(d);
+  }).catch(function(e){ alert('预热失败: '+e); });
+}
+function startBatch(fd){
+  fetch('/api/batch',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
+    if(d.error){ alert(d.error); return; }
+    beginBatch(d);
+  }).catch(function(e){ alert('提交失败: '+e); });
+}
+function beginBatch(d){
+  curBatchId=d.batch_id;
+  document.getElementById('batch-info').style.display='block';
+  document.getElementById('batch-id').textContent=d.batch_id;
+  document.getElementById('batch-total').textContent=d.total_count;
+  document.getElementById('batch-hit').textContent=d.hit_count;
+  document.getElementById('prog-done-msg').style.display='none';
+  document.getElementById('reinit-note').style.display='none';
+  poll(); pollTimer=setInterval(poll,2000);
+}
+function poll(){
+  if(!curBatchId) return;
+  fetch('/api/batch/'+curBatchId+'/progress').then(function(r){return r.json();}).then(function(p){
+    var done=p.done, failed=p.failed, skipped=p.skipped, total=p.total;
+    var finished=done+failed+skipped;
+    var pct = total>0 ? Math.round(finished/total*100) : 0;
+    document.getElementById('prog-bar').style.width=pct+'%';
+    document.getElementById('prog-pct').textContent=pct+'%';
+    document.getElementById('prog-done').textContent=done;
+    document.getElementById('prog-failed').textContent=failed;
+    document.getElementById('prog-skipped').textContent=skipped;
+    document.getElementById('prog-total').textContent=total;
+    document.getElementById('prog-current').textContent=p.current_symbol||'—';
+    document.getElementById('prog-status').textContent=p.status;
+    document.getElementById('prog-eta').textContent=fmtEta(p.eta_seconds);
+    if(['done','cancelled','interrupted'].indexOf(p.status)>=0){
+      clearInterval(pollTimer); pollTimer=null;
+      document.getElementById('prog-done-msg').style.display='block';
+      if(p.status==='interrupted'){ document.getElementById('reinit-note').style.display='block'; }
+      loadBatches();
+    }
+  }).catch(function(){});
+}
+var _cancelling=false;
+function cancelBatch(){
+  if(!curBatchId || _cancelling) return;
+  _cancelling=true;
+  document.getElementById('cancel-btn').disabled=true;
+  document.getElementById('cancel-btn').textContent='取消中...';
+  clearInterval(pollTimer); pollTimer=null;
+  fetch('/api/batch/'+curBatchId+'/cancel',{method:'POST'}).then(function(){
+    document.getElementById('prog-status').textContent='cancelling';
+    document.getElementById('prog-done-msg').innerHTML='✅ 取消请求已发送，正在停止中...';
+    document.getElementById('prog-done-msg').style.display='block';
+  }).catch(function(){
+    _cancelling=false;
+    document.getElementById('cancel-btn').disabled=false;
+    document.getElementById('cancel-btn').textContent='取消批次';
+  });
+}
+function loadSectorStatus(){
+  var strat=document.getElementById('strategy').value;
+  fetch('/api/sector-status?strategy='+encodeURIComponent(strat)).then(function(r){return r.json();}).then(function(d){
+    var box=document.getElementById('sector-overview');
+    var secs=d.sectors||[];
+    if(!secs.length){ box.innerHTML='<span class="empty">暂无板块数据</span>'; return; }
+    box.innerHTML=secs.map(function(s){
+      var icon = s.status==='done'?'✅':(s.status==='partial'?'⏳':'—');
+      return '<span class="sec" title="'+s.name+'：done='+s.done+'/total='+s.total+'">'+icon+' '+s.name+'</span>';
+    }).join('');
+  }).catch(function(){ document.getElementById('sector-overview').innerHTML='<span class="empty">加载失败</span>'; });
+}
+function loadBatches(){
+  fetch('/api/batch').then(function(r){return r.json();}).then(function(d){
+    var box=document.getElementById('batch-history');
+    var bs=d.batches||[];
+    if(!bs.length){ box.innerHTML='<span class="empty">暂无批次</span>'; return; }
+    var h='<table class="btab"><tr><th>批次</th><th>策略</th><th>范围</th><th>状态</th><th>完成</th><th>创建</th></tr>';
+    h+=bs.map(function(b){
+      return '<tr><td>'+b.batch_id.slice(0,8)+'</td><td>'+b.strategy_name+'</td><td>'+b.scope_type+'</td><td>'+b.status+'</td><td>'+b.done_count+'/'+b.total_count+'</td><td>'+((b.created_at||'').slice(0,19))+'</td></tr>';
+    }).join('')+'</table>';
+    box.innerHTML=h;
+  }).catch(function(){ document.getElementById('batch-history').innerHTML='<span class="empty">加载失败</span>'; });
+}
+document.getElementById('strategy').addEventListener('change', loadSectorStatus);
+window.addEventListener('DOMContentLoaded', function(){ switchScope(); loadSectorStatus(); loadBatches(); });
+</script>
+</body>
+</html>"""
+    return (
+        template.replace("__STRAT_OPTS__", strat_opts)
+        .replace("__SECTOR_OPTS__", sector_opts)
+        .replace("__NAV_HTML__", NAV_HTML)
+        .replace("__NAV_CSS__", NAV_CSS)
+    )
+
+
+def build_analysis_html() -> str:
+    """分析查询页 /analysis：表单 + 排名表 + 点行进详情。无日期选择器。"""
+    strat_opts = "\n".join(
+        f'          <option value="{fname}">{name}</option>' for name, fname in list_strategy_options()
+    )
+    import json as _json, pathlib
+    _sec_path = pathlib.Path("data/sectors.json")
+    _sectors = _json.loads(_sec_path.read_text(encoding="utf-8")) if _sec_path.exists() else []
+    scope_opts = '<option value="">全部已跑过的</option>\n' + "\n".join(
+        f'          <option value="{s["code"]}">{s["name"]}</option>' for s in _sectors
+    )
+
+    template = """<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>分析查询 · Strategy Lab</title>
+<style>
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:linear-gradient(160deg,#0f172a,#1e293b); color:#e2e8f0; min-height:100vh; }
+  .wrap { max-width:980px; margin:0 auto; padding:28px 20px 64px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .sub { color:#94a3b8; margin:0 0 18px; font-size:14px; }
+  .card { background:#1e293b; border:1px solid #334155; border-radius:14px; padding:22px 22px; margin-bottom:18px;
+          box-shadow:0 10px 30px rgba(0,0,0,.35); }
+  label { display:block; font-size:13px; color:#cbd5e1; margin:14px 0 8px; font-weight:600; }
+  input, select, textarea { width:100%; padding:11px 13px; border-radius:9px; border:1px solid #475569;
+          background:#0f172a; color:#e2e8f0; font-size:14px; outline:none; }
+  input:focus, select:focus, textarea:focus { border-color:#1f6feb; }
+  button { margin-top:14px; padding:10px 16px; border:0; border-radius:9px; cursor:pointer;
+           background:linear-gradient(90deg,#1f6feb,#3b82f6); color:#fff; font-size:14px; font-weight:700; }
+  button:hover { filter:brightness(1.08); }
+  button.ghost { background:#334155; font-weight:500; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .hint { font-size:12px; color:#64748b; margin-top:6px; }
+  .summary { font-size:14px; margin-bottom:10px; }
+  .summary a { color:#93c5fd; }
+  .rtab { width:100%; border-collapse:collapse; font-size:13px; }
+  .rtab th, .rtab td { border-bottom:1px solid #1e293b; padding:10px 10px; text-align:left; cursor:pointer; }
+  .rtab th { color:#93c5fd; cursor:default; }
+  .rtab tr:hover { background:#172033; }
+  .rtab .pos { color:#f87171; }
+  .rtab .neg { color:#4ade80; }
+  .stale { background:#7c2d12; color:#fdba74; font-size:11px; padding:2px 7px; border-radius:5px; }
+  .pager { display:flex; gap:12px; align-items:center; margin-top:14px; }
+  .empty { color:#64748b; font-size:13px; padding:20px 0; text-align:center; }
+  code { background:#0f172a; padding:1px 6px; border-radius:5px; color:#93c5fd; font-size:12px; }
+__NAV_CSS__</style>
+</head>
+<body>
+__NAV_HTML__
+<div class="wrap">
+  <h1>🔍 分析查询</h1>
+  <p class="sub">选策略 + 选范围，查看已落库回测的收益排名（按总收益率降序）。点行查看单标的详情仪表盘。</p>
+
+  <div class="card">
+    <label for="strategy">策略</label>
+    <select id="strategy">
+__STRAT_OPTS__
+    </select>
+    <label for="scope-sel">范围</label>
+    <select id="scope-sel">
+__SCOPE_OPTS__
+    </select>
+    <label for="pool-symbols">自定义池（可选，代码逗号/空格分隔；填写后优先于上方范围）</label>
+    <textarea id="pool-symbols" rows="3" placeholder="600216.SH, 000001.SZ"></textarea>
+    <button type="button" onclick="loadRank(1)">查询排名</button>
+    <button type="button" class="ghost" onclick="exportCsv()">⬇ 导出 CSV</button>
+  </div>
+
+  <div class="card">
+    <div class="summary" id="rank-summary">—</div>
+    <div id="rank-table"><span class="empty">请先查询</span></div>
+    <div class="pager" id="rank-pager"></div>
+  </div>
+</div>
+<script>
+var curStrategy='', curScope='', curSymbols='';
+function loadRank(page){
+  curStrategy=document.getElementById('strategy').value;
+  curScope=document.getElementById('scope-sel').value;
+  curSymbols=document.getElementById('pool-symbols').value.trim();
+  var qs='strategy='+encodeURIComponent(curStrategy)+'&page='+page+'&size=50';
+  if(curScope) qs+='&scope='+encodeURIComponent(curScope);
+  if(curSymbols) qs+='&symbols='+encodeURIComponent(curSymbols);
+  fetch('/api/rank?'+qs).then(function(r){return r.json();}).then(function(d){
+    var items=d.items||[], total=d.total||0, miss=d.miss_count;
+    document.getElementById('rank-summary').innerHTML = '共 <b>'+total+'</b> 只已跑过'
+      + (miss!=null ? '，还有 <b>'+miss+'</b> 只未跑（<a href="/production">去数据生产页发起</a>）' : '');
+    var box=document.getElementById('rank-table');
+    if(!items.length){ box.innerHTML='<div class="empty">暂无已跑过的回测（请先在数据生产页发起）</div>'; document.getElementById('rank-pager').innerHTML=''; return; }
+    var h='<table class="rtab"><tr><th>股票名称</th><th>总收益率</th><th>最大回撤</th><th>夏普</th><th>数据时效</th></tr>';
+    h+=items.map(function(it){
+      var tr = it.total_return_pct==null?'—':(it.total_return_pct>=0?'+':'')+Number(it.total_return_pct).toFixed(2)+'%';
+      var cls = (it.total_return_pct!=null && it.total_return_pct>=0)?'pos':'neg';
+      var dd = it.max_drawdown_pct==null?'—':Number(it.max_drawdown_pct).toFixed(2)+'%';
+      var sh = it.sharpe==null?'—':Number(it.sharpe).toFixed(2);
+      var stale = it.stale?'<span class="stale">数据较旧，建议重跑</span>':'';
+      return '<tr onclick="openRun(\\''+it.run_id+'\\')"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+stale+'</td></tr>';
+    }).join('');
+    h+='</table>';
+    box.innerHTML=h;
+    var pages=Math.max(1, Math.ceil(total/50));
+    document.getElementById('rank-pager').innerHTML='<button onclick="loadRank('+(page-1)+')" '+(page<=1?'disabled':'')+'>上一页</button>'
+      +' <span>第 '+page+' / '+pages+' 页</span> '
+      +'<button onclick="loadRank('+(page+1)+')" '+(page>=pages?'disabled':'')+'>下一页</button>';
+  }).catch(function(){ document.getElementById('rank-table').innerHTML='<div class="empty">加载失败</div>'; });
+}
+function openRun(rid){ window.open('/history?run_id='+rid); }
+function exportCsv(){
+  var qs='strategy='+encodeURIComponent(curStrategy)+'&export=csv';
+  if(curScope) qs+='&scope='+encodeURIComponent(curScope);
+  if(curSymbols) qs+='&symbols='+encodeURIComponent(curSymbols);
+  window.open('/api/rank?'+qs);
+}
+document.getElementById('strategy').addEventListener('change',function(){ loadRank(1); });
+document.getElementById('scope-sel').addEventListener('change',function(){ loadRank(1); });
+window.addEventListener('DOMContentLoaded', function(){ loadRank(1); });
+</script>
+</body>
+</html>"""
+    return (
+        template.replace("__STRAT_OPTS__", strat_opts)
+        .replace("__SCOPE_OPTS__", scope_opts)
+        .replace("__NAV_HTML__", NAV_HTML)
+        .replace("__NAV_CSS__", NAV_CSS)
+    )
 
 
 def error_page(msg: str) -> str:
@@ -511,6 +926,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -523,22 +939,35 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_csv(self, csv_text: str, filename: str):
+        body = ("\ufeff" + csv_text).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header(
+            "Content-Disposition", f'attachment; filename="{filename}"'
+        )
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send_404(self):
         self._send_html("<h1>404</h1><p><a href='/'>返回首页</a></p>", status=404)
 
+    # ---- API 辅助 ----
     def _api_sector_stocks(self):
         import json as _json
+        from pathlib import Path
+
         q = urllib.parse.urlparse(self.path).query
         params = urllib.parse.parse_qs(q)
         code = (params.get("code", [""])[0] or "").strip()
         if not code:
             self._send_json({"stocks": [], "error": "missing code"})
             return
-        # 读缓存
         cache_path = "data/sector_stocks.json"
         cache = {}
         try:
-            from pathlib import Path
             if Path(cache_path).exists():
                 with open(cache_path, "r", encoding="utf-8") as fh:
                     cache = _json.load(fh)
@@ -546,7 +975,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
         stocks = cache.get(code, [])
         if not stocks:
-            stocks = [{"code":"--","name":"板块数据暂未缓存，请先通过管理端拉取"}]
+            stocks = [{"code": "--", "name": "板块数据暂未缓存，请先通过管理端拉取"}]
         self._send_json({"stocks": stocks})
 
     def _api_search(self):
@@ -561,9 +990,12 @@ class Handler(BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(parsed.query)
         symbol = (params.get("symbol", [""])[0] or "").strip() or None
         strategy = (params.get("strategy", [""])[0] or "").strip() or None
+        params_hash = (params.get("params_hash", [""])[0] or "").strip() or None
         limit_raw = (params.get("limit", [""])[0] or "").strip()
         limit = int(limit_raw) if limit_raw and limit_raw.isdigit() else None
-        runs = storage_repo.list_runs(symbol=symbol, strategy=strategy, limit=limit)
+        runs = storage_repo.list_runs(
+            symbol=symbol, strategy=strategy, params_hash=params_hash, limit=limit
+        )
         self._send_json({"runs": runs, "count": len(runs)})
 
     def _api_run_detail(self, run_id: str):
@@ -577,19 +1009,226 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_json(run)
 
+    def _api_rank(self):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        strategy = (params.get("strategy", [""])[0] or "").strip()
+        scope = (params.get("scope", [""])[0] or "").strip() or None
+        ph = (params.get("params_hash", [""])[0] or "").strip() or None
+        export = (params.get("export", [""])[0] or "").strip()
+        try:
+            page = int((params.get("page", ["1"])[0] or "1"))
+        except ValueError:
+            page = 1
+        try:
+            size = int((params.get("size", ["50"])[0] or "50"))
+        except ValueError:
+            size = 50
+        if not strategy:
+            self._send_json({"error": "missing strategy"}, status=400)
+            return
+        try:
+            cfg = load_strategy_by_arg(strategy)
+        except Exception as e:  # noqa: BLE001
+            self._send_json({"error": f"策略加载失败: {e}"}, status=400)
+            return
+        strategy_name = cfg.get("name", "")
+        if not ph:
+            ph = compute_params_hash(cfg)
+        symbols_raw = (params.get("symbols", [""])[0] or "").strip()
+        symbols = (
+            [s.strip() for s in re.split(r"[,\s]+", symbols_raw) if s.strip()]
+            if symbols_raw
+            else None
+        )
+        if export == "csv":
+            data = storage_repo.rank_runs(
+                strategy_name, ph, scope=scope, symbols=symbols, page=1, size=100000
+            )
+            self._send_csv(_ranks_to_csv(data["items"]), f"rank_{strategy_name}.csv")
+            return
+        data = storage_repo.rank_runs(
+            strategy_name, ph, scope=scope, symbols=symbols, page=page, size=size
+        )
+        self._send_json(data)
+
+    def _api_sector_status(self):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        strategy = (params.get("strategy", [""])[0] or "").strip()
+        ph = (params.get("params_hash", [""])[0] or "").strip() or None
+        if not strategy:
+            self._send_json({"sectors": []})
+            return
+        try:
+            cfg = load_strategy_by_arg(strategy)
+        except Exception:  # noqa: BLE001
+            self._send_json({"sectors": []})
+            return
+        strategy_name = cfg.get("name", "")
+        if not ph:
+            ph = compute_params_hash(cfg)
+        sectors = storage_repo.sector_status(strategy_name, ph)
+        self._send_json({"sectors": sectors})
+
+    def _api_batch_list(self):
+        self._send_json({"batches": storage_repo.list_batches()})
+
+    def _api_batch_progress(self, batch_id: str):
+        self._send_json(batch_runner.get_progress(batch_id))
+
+    def _api_batch_sector_overview(self, batch_id: str):
+        self._send_json({"sectors": storage_repo.batch_sector_status(batch_id)})
+
+    def _api_submit_batch(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length).decode("utf-8")
+        data = urllib.parse.parse_qs(raw)
+        strategy = (data.get("strategy", ["kdj_macd_dual_entry"])[0] or "kdj_macd_dual_entry").strip() or "kdj_macd_dual_entry"
+        scope_type = (data.get("scope_type", ["sector"])[0] or "sector").strip()
+        scope_value = (data.get("scope_value", [""])[0] or "").strip()
+        symbols_raw = (data.get("symbols", [""])[0] or "").strip()
+        try:
+            cfg = load_strategy_by_arg(strategy)
+        except Exception as e:  # noqa: BLE001
+            self._send_json({"error": f"策略加载失败: {e}"}, status=400)
+            return
+        strategy_name = cfg.get("name", "")
+        ph = compute_params_hash(cfg)
+        out_dir = get_data_dir()
+
+        items: list[dict] = []
+        if scope_type == "sector":
+            codes = [c.strip() for c in scope_value.split(",") if c.strip()]
+            stocks = storage_repo.get_sector_stocks()
+            seen: set[str] = set()
+            for code in codes:
+                for st in stocks.get(code, []):
+                    sym = st["code"]
+                    if sym in seen:
+                        continue
+                    seen.add(sym)
+                    items.append(
+                        {"symbol": sym, "symbol_name": st.get("name", sym), "sector_code": code}
+                    )
+        elif scope_type == "pool":
+            syms = [s.strip() for s in re.split(r"[,\s]+", symbols_raw) if s.strip()]
+            for s in syms:
+                items.append({"symbol": s, "symbol_name": s, "sector_code": None})
+        elif scope_type == "all_market":
+            items = _expand_all_market()
+        else:
+            self._send_json({"error": "未知 scope_type"}, status=400)
+            return
+
+        if not items:
+            self._send_json({"error": "没有可执行的标的（请检查范围选择）"}, status=400)
+            return
+
+        batch_id, hit_count = batch_runner.submit_batch(
+            cfg, strategy_name, ph, scope_type, scope_value, str(out_dir), items
+        )
+        self._send_json(
+            {
+                "batch_id": batch_id,
+                "total_count": len(items),
+                "hit_count": hit_count,
+                "strategy_name": strategy_name,
+                "params_hash": ph,
+            }
+        )
+
+    def _api_warmup_all(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        data = urllib.parse.parse_qs(raw)
+        strategy = (data.get("strategy", ["kdj_macd_dual_entry"])[0] or "kdj_macd_dual_entry").strip() or "kdj_macd_dual_entry"
+        try:
+            cfg = load_strategy_by_arg(strategy)
+        except Exception as e:  # noqa: BLE001
+            self._send_json({"error": f"策略加载失败: {e}"}, status=400)
+            return
+        strategy_name = cfg.get("name", "")
+        ph = compute_params_hash(cfg)
+        out_dir = get_data_dir()
+        items = _expand_all_market()
+        if not items:
+            self._send_json({"error": "无成分股数据（请先拉取板块缓存）"}, status=400)
+            return
+        batch_id, hit_count = batch_runner.submit_batch(
+            cfg, strategy_name, ph, "all_market", "ALL", str(out_dir), items
+        )
+        self._send_json(
+            {
+                "batch_id": batch_id,
+                "total_count": len(items),
+                "hit_count": hit_count,
+                "strategy_name": strategy_name,
+                "params_hash": ph,
+            }
+        )
+
+    def _api_cancel_batch(self, batch_id: str):
+        batch_runner.cancel_batch(batch_id)
+        self._send_json({"ok": True})
+
+    def _render_single_run(self, run_id: str):
+        try:
+            report = build_compare_from_runs([run_id])
+        except Exception as e:  # noqa: BLE001
+            self._send_html(error_page(f"{type(e).__name__}: {e}"), status=500)
+            return
+        import tempfile as _tf
+
+        fd, tmp = _tf.mkstemp(suffix=".html")
+        os.close(fd)
+        rendered = render_dashboard(report, output_path=tmp)
+        html = Path(rendered).read_text(encoding="utf-8")
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        self._send_html(inject_back_button(html))
+
+    # ---- 路由 ----
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        path = self.path.split("?", 1)[0]
+        if path in ("/", "/index.html"):
             self._send_html(build_form_html())
-        elif self.path.startswith("/api/sector-stocks"):
+        elif path == "/production":
+            self._send_html(build_production_html())
+        elif path == "/analysis":
+            self._send_html(build_analysis_html())
+        elif path.startswith("/api/sector-status"):
+            self._api_sector_status()
+        elif path.startswith("/api/sector-stocks"):
             self._api_sector_stocks()
-        elif self.path.startswith("/api/search"):
+        elif path.startswith("/api/search"):
             self._api_search()
-        elif self.path.startswith("/api/runs/"):
-            self._api_run_detail(self.path[len("/api/runs/"):])
-        elif self.path.startswith("/api/runs"):
+        elif path.startswith("/api/runs/"):
+            self._api_run_detail(self.path[len("/api/runs/"):].split("?")[0])
+        elif path.startswith("/api/runs"):
             self._api_runs()
-        elif self.path == "/history":
-            self._send_html(build_history_html())
+        elif path.startswith("/api/rank"):
+            self._api_rank()
+        elif path.startswith("/api/batch/"):
+            rest = path[len("/api/batch/"):]
+            if "/progress" in rest:
+                self._api_batch_progress(rest.split("/")[0])
+            elif "/sector-overview" in rest:
+                self._api_batch_sector_overview(rest.split("/")[0])
+            else:
+                self._send_404()
+        elif path == "/api/batch":
+            self._api_batch_list()
+        elif path == "/history":
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            run_id = (params.get("run_id", [""])[0] or "").strip()
+            if run_id:
+                self._render_single_run(run_id)
+            else:
+                self._send_html(build_history_html())
         else:
             self._send_404()
 
@@ -599,7 +1238,6 @@ class Handler(BaseHTTPRequestHandler):
         data = urllib.parse.parse_qs(raw)
         symbols_raw = (data.get("symbols", [""])[0] or "").strip()
         symbols = [s for s in re.split(r"[,\s]+", symbols_raw) if s]
-        # 防御：过滤掉含中文的「伪代码」（说明前端 _stockMap 映射失败）
         if any(re.search(r"[\u4e00-\u9fff]", s) for s in symbols):
             raise ValueError("标的代码包含中文，请通过搜索框或板块面板重新选股。提示：选中板块芯片后务必确认已点「运行回测」前页面刷新完毕。")
         names_raw = (data.get("names", [""])[0] or "").strip()
@@ -627,7 +1265,6 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("请至少选择 1 个回测结果进行对比。")
         logger.info("[compare] run_ids=%s", run_ids)
         report = build_compare_from_runs(run_ids)
-        # render_dashboard 需要输出路径；写到系统临时文件后读回 HTML 字符串
         import tempfile as _tempfile
 
         fd, tmp_path = _tempfile.mkstemp(suffix=".html")
@@ -641,7 +1278,8 @@ class Handler(BaseHTTPRequestHandler):
         return html
 
     def do_POST(self):
-        if self.path == "/run":
+        path = self.path.split("?", 1)[0]
+        if path == "/run":
             try:
                 html = self._handle_run()
                 self._send_html(inject_back_button(html))
@@ -649,7 +1287,7 @@ class Handler(BaseHTTPRequestHandler):
                 import traceback
                 logger.error("[error] %s", traceback.format_exc())
                 self._send_html(error_page(f"{type(e).__name__}: {e}"), status=500)
-        elif self.path == "/compare":
+        elif path == "/compare":
             try:
                 html = self._handle_compare()
                 self._send_html(inject_back_button(html))
@@ -657,6 +1295,29 @@ class Handler(BaseHTTPRequestHandler):
                 import traceback
                 logger.error("[error] %s", traceback.format_exc())
                 self._send_html(error_page(f"{type(e).__name__}: {e}"), status=500)
+        elif path == "/api/batch/warmup-all":
+            try:
+                self._api_warmup_all()
+            except Exception as e:  # noqa: BLE001
+                import traceback
+                logger.error("[error] %s", traceback.format_exc())
+                self._send_json({"error": str(e)}, status=500)
+        elif path == "/api/batch":
+            try:
+                self._api_submit_batch()
+            except Exception as e:  # noqa: BLE001
+                import traceback
+                logger.error("[error] %s", traceback.format_exc())
+                self._send_json({"error": str(e)}, status=500)
+        elif path.startswith("/api/batch/"):
+            rest = path[len("/api/batch/"):]
+            if "/cancel" in rest:
+                try:
+                    self._api_cancel_batch(rest.split("/")[0])
+                except Exception as e:  # noqa: BLE001
+                    self._send_json({"error": str(e)}, status=500)
+            else:
+                self._send_404()
         else:
             self._send_404()
 
@@ -664,7 +1325,50 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
+def _ranks_to_csv(items: list[dict]) -> str:
+    """把排名 items 转为 CSV 文本（含 BOM 供 Excel）。"""
+    cols = ["run_id", "symbol", "symbol_name", "total_return_pct", "max_drawdown_pct", "sharpe", "end", "stale"]
+    lines = [",".join(cols)]
+    for it in items:
+        row = [
+            it.get("run_id", ""),
+            it.get("symbol", ""),
+            it.get("symbol_name", ""),
+            "" if it.get("total_return_pct") is None else f"{it['total_return_pct']:.2f}",
+            "" if it.get("max_drawdown_pct") is None else f"{it['max_drawdown_pct']:.2f}",
+            "" if it.get("sharpe") is None else f"{it['sharpe']:.2f}",
+            it.get("end", "") or "",
+            "1" if it.get("stale") else "0",
+        ]
+        # CSV 简单转义（名称含逗号/引号时包裹）
+        row = [f'"{c}"' if ("," in str(c) or '"' in str(c)) else str(c) for c in row]
+        lines.append(",".join(row))
+    return "\n".join(lines)
+
+
+def _expand_all_market() -> list[dict]:
+    """展开全部 31 板块成分股（去重，带 sector_code）。"""
+    stocks = storage_repo.get_sector_stocks()
+    items: list[dict] = []
+    seen: set[str] = set()
+    for code, lst in stocks.items():
+        for st in lst:
+            sym = st["code"]
+            if sym in seen:
+                continue
+            seen.add(sym)
+            items.append(
+                {"symbol": sym, "symbol_name": st.get("name", sym), "sector_code": code}
+            )
+    return items
+
+
 def main():
+    from .engine.storage import db
+
+    db.init_db()  # 触发 v1→v2 迁移（幂等）
+    batch_runner.init_batch_runner()  # 重启处理：running → interrupted
+
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     logger.info("量化回测服务已启动 → http://localhost:%s (Ctrl+C 停止)", PORT)
     try:

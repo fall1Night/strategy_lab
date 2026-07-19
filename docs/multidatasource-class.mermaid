@@ -1,0 +1,131 @@
+classDiagram
+    %% ===== 抽象契约 =====
+    class DataSource {
+        <<abstract>>
+        +str name
+        +DataSourceConfig config
+        +fetch_kline(symbol, period, start, end, **params) DataFrame
+        +normalize(symbol) SymbolSpec
+        +health() HealthStatus
+        #_raw_fetch_kline(symbol, period, start, end, **params) object
+        -_throttle()
+        -_wait_circuit_breaker()
+        -_on_fetch_failure()
+        -_on_fetch_success()
+    }
+
+    class SymbolSpec {
+        +str symbol   %% 600216.SH (display)
+        +str secid    %% 1.600216 (eastmoney)
+        +str prefix   %% 600216_sh
+    }
+
+    class HealthStatus {
+        +str name
+        +str status   %% ok|degraded|open|unavailable
+        +float last_success_ts
+        +float last_failure_ts
+        +int consecutive_failures
+        +float cb_open_until
+    }
+
+    class DataSourceConfig {
+        +str default_source
+        +dict symbol_overrides
+        +list fallback_order
+        +bool failover_enabled
+        +str tushare_token
+        +float min_fetch_gap
+        +bool cb_enabled
+        +from_env() DataSourceConfig
+    }
+
+    class DataSourceFactory {
+        +get(name, cfg) DataSource
+        +get_effective_source(symbol) str
+        +build_chain(symbol) list~DataSource~
+        +available_sources() list~str~
+    }
+
+    class KlineCache {
+        +load(spec, source, period, beg, end) DataFrame|None
+        +save(spec, source, period, df, beg, end) Path
+        -_covers(meta, beg, end) bool
+        -_atomic_write_csv(lines, path) int
+        -_atomic_write_meta(meta, path)
+    }
+
+    class SwitchEvent {
+        +float timestamp
+        +str symbol
+        +str period
+        +str from_source
+        +str to_source
+        +str reason
+    }
+
+    class SwitchLog {
+        +record(event) void
+        +recent(n) list~SwitchEvent~
+        -ring: list
+        -file: Path
+    }
+
+    class KlineProvider {
+        +ensure_data(symbol_cfg, out_dir, daily_beg, daily_end, daily_lmt, weekly_beg, weekly_end, weekly_lmt) tuple~Path,Path~
+        -_resolve_chain(symbol_cfg) list~DataSource~
+        -_try_chain(chain, spec, period, beg, end) DataFrame
+    }
+
+    class Exceptions {
+        <<package>>
+        DataSourceError
+        MissingDependencyError
+        DataSourceUnavailableError
+        AllSourcesFailedError
+    }
+
+    %% ===== 具体适配器 =====
+    class EastmoneyDataSource {
+        +str name = "eastmoney"
+        #_raw_fetch_kline(...) list~str~
+    }
+    class AkshareDataSource {
+        +str name = "akshare"
+        #_raw_fetch_kline(...) DataFrame
+    }
+    class TushareDataSource {
+        +str name = "tushare"
+        #_raw_fetch_kline(...) DataFrame
+    }
+    class BrokerDataSource {
+        +str name = "broker"
+        #_raw_fetch_kline(...) None
+    }
+
+    %% ===== 关系 =====
+    EastmoneyDataSource  --|> DataSource
+    AkshareDataSource    --|> DataSource
+    TushareDataSource    --|> DataSource
+    BrokerDataSource     --|> DataSource
+
+    DataSourceFactory --> DataSourceConfig : reads
+    DataSourceFactory ..> EastmoneyDataSource : creates
+    DataSourceFactory ..> AkshareDataSource   : creates
+    DataSourceFactory ..> TushareDataSource    : creates
+    DataSourceFactory ..> BrokerDataSource     : creates (P2 stub)
+
+    KlineProvider *-- DataSourceFactory
+    KlineProvider *-- KlineCache
+    KlineProvider *-- SwitchLog
+
+    DataSource ..> SymbolSpec : produces/consumes
+    DataSource ..> HealthStatus : returns
+    DataSource ..> Exceptions : raises
+
+    SwitchLog o-- SwitchEvent
+    KlineCache ..> SymbolSpec : uses
+
+    note for DataSource "fetch_kline 为模板方法：\n限流→等熔断→重试循环→\n成功复位/失败计数；\n_raw_fetch_kline 由适配器实现"
+    note for KlineProvider "对外契约 = 旧 ensure_data 签名\n(backtest.py 零改动)"
+    note for BrokerDataSource "P2 桩：_raw_fetch_kline 抛\nDataSourceUnavailableError"

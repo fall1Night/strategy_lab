@@ -19,7 +19,8 @@ from .strategies import get_strategy_class
 
 def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
               start: str, end: str, out_dir: str | Path,
-              batch_id: str | None = None) -> dict[str, Any]:
+              batch_id: str | None = None,
+              data_source: str | None = None) -> dict[str, Any]:
     """对单个标的跑回测，把结果落库（SQLAlchemy，DB 无关），返回结果 dict（含 run_id）。
 
     不再写三件套文件：防御校验与 summary 计算交给
@@ -81,6 +82,9 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
     meta = er.get("meta", {})
 
     # 落库（DB 不可用会向上抛错，由调用方明确报错，不再静默回退文件）
+    params_json = json.dumps(strategy_cfg, ensure_ascii=False, default=str)
+    from .storage import repository
+
     run_meta = {
         "batch_id": batch_id,
         "strategy_type": strategy_cfg.get("type", ""),
@@ -90,9 +94,11 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
         "start": start,
         "end": end,
         "initial_cash": float(strategy_cfg["params"]["initial_cash"]),
-        "params_json": json.dumps(strategy_cfg, ensure_ascii=False, default=str),
+        "params_json": params_json,
+        "params_hash": repository.compute_params_hash(strategy_cfg),
         "positions_json": json.dumps(res.get("positions"), ensure_ascii=False, default=str),
         "meta_json": json.dumps(meta, ensure_ascii=False, default=str),
+        "data_source": data_source,
     }
     run_id = repository.save_run(
         run_meta, equity_curve, trade_history, summary, res.get("positions")

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "strategylab"
-version = "0.2.0"
-description = "A股周线MACD+日线KDJ双入口做T量化回测服务（结果落库，DB无关）"
+version = "2.0.0"
+description = "A股周线MACD+日线KDJ双入口做T量化回测服务（批量扫描+数据仓库化，DB无关）"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -20,6 +20,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["ruff", "black", "mypy", "pytest", "pytest-cov"]
 postgres = ["psycopg2-binary>=2.9"]
+akshare = ["akshare"]
+tushare = ["tushare"]
+datasources = ["akshare", "tushare"]
 
 [project.scripts]
 strategylab = "strategylab.cli:main"

@@ -1,0 +1,38 @@
+sequenceDiagram
+    autonumber
+    participant BT as backtest.run_symbol
+    participant SHIM as data_feed.ensure_data (兼容层)
+    participant P as KlineProvider.ensure_data
+    participant F as DataSourceFactory
+    participant C as KlineCache
+    participant S as SwitchLog
+    participant EM as EastmoneyDataSource
+    participant AK as AkshareDataSource
+
+    BT->>SHIM: ensure_data(sym_cfg, out_dir, daily_beg..., weekly_beg...)
+    SHIM->>P: ensure_data(同签名)
+    P->>F: get_effective_source(symbol)  %% 默认 or 按品种覆盖
+    F-->>P: source = "eastmoney"
+    loop 对 daily / weekly
+        P->>C: load(spec, "eastmoney", period, beg, end)
+        alt 缓存命中(区间覆盖)
+            C-->>P: DataFrame (复用，跳过取数)
+        else 缓存未命中
+            P->>F: build_chain(symbol)  %% [eastmoney] + fallback
+            F-->>P: [EM, AK]
+            P->>EM: fetch_kline(symbol, period, start, end)
+            Note over EM: 限流→等熔断→重试循环→_raw_fetch_kline
+            EM-->>P: DataFrame (成功)
+            alt 主源失败(限流/断连/超时，重试耗尽)
+                EM-->>P: raise DataSourceError
+                P->>S: record(SwitchEvent from=eastmoney to=akshare reason=err))
+                P->>AK: fetch_kline(symbol, period, start, end)
+                AK-->>P: DataFrame (备用源成功)
+            end
+            P->>C: save(spec, "eastmoney", period, df, beg, end)
+            Note over C: 写 <prefix>_eastmoney_<period>.csv + _meta.json (原子)
+        end
+    end
+    P-->>SHIM: (daily_csv, weekly_csv)  %% 路径，签名不变
+    SHIM-->>BT: (daily_csv, weekly_csv)
+    BT->>SHIM: load_bars(daily_csv) / load_bars(weekly_csv)  %% 不变

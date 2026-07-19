@@ -31,7 +31,7 @@ _engine: Engine | None = None
 _SessionFactory: sessionmaker | None = None
 
 # 当前 schema 版本（与 migrate.SCHEMA_VERSION 同源；db.init_db 负责写入）。
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 3
 
 
 def _database_url() -> str:
@@ -54,8 +54,11 @@ def get_engine() -> Engine:
 
                 kwargs["poolclass"] = StaticPool
         else:
-            # 远程库开启连接健康检查
+            # 远程库（MySQL/Postgres）开启连接池调优：健康检查 + 回收 + 溢出
             kwargs["pool_pre_ping"] = True
+            kwargs["pool_size"] = 10
+            kwargs["max_overflow"] = 5
+            kwargs["pool_recycle"] = 1800
         _engine = create_engine(url, future=True, **kwargs)
     return _engine
 
@@ -77,19 +80,41 @@ def SessionLocal() -> Session:
 def init_db() -> None:
     """创建所有表并登记 schema 版本（幂等，单一来源）。
 
-    建表后补登 ``schema_version``（v1 仅首次写入，后续重复调用不会新增行），
-    避免历史上该表被 ``create_all`` 建出却恒为空的问题。
+    建表后：
+      - 若 ``backtest_runs`` 已存在但缺少 ``params_hash`` 列 → 旧 v1 库，
+        触发 ``migrate.migrate_v1_to_v2``（加列 / 建新表 / 回填 / 写版本）。
+      - 否则为新库，直接补登 ``schema_version`` 为当前版本。
     生产库建议改用 Alembic；v1 用 create_all + 单行版本号足矣。
     """
+    from sqlalchemy import inspect
+
     from .schema import Base, SchemaVersion
 
-    Base.metadata.create_all(get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(engine)
 
-    # 登记/补登 schema 版本：仅当表为空时插入 version=1
-    with SessionLocal() as s:
-        if s.query(SchemaVersion).first() is None:
-            s.add(SchemaVersion(version=SCHEMA_VERSION))
-        s.commit()
+    # 检测是否需要迁移
+    insp = inspect(engine)
+    columns = [c["name"] for c in insp.get_columns("backtest_runs")] if insp.has_table("backtest_runs") else []
+
+    if insp.has_table("backtest_runs") and "params_hash" not in columns:
+        # v1 → v2 迁移：加 params_hash 列
+        from . import migrate
+        migrate.migrate_v1_to_v2(engine)
+        # 重新检测列（迁移后可能有 params_hash 但无 data_source）
+        columns = [c["name"] for c in inspect(engine).get_columns("backtest_runs")]
+
+    # v2 → v3：加 data_source 列 + 回填历史 'eastmoney'
+    if insp.has_table("backtest_runs") and "data_source" not in columns:
+        from . import migrate
+        migrate.migrate_v2_to_v3(engine)
+    else:
+        # 新库或已是 v3：补登/跳过 schema_version
+        with SessionLocal() as s:
+            cur = s.query(SchemaVersion).order_by(SchemaVersion.id.desc()).first()
+            if cur is None or int(cur.version) < SCHEMA_VERSION:
+                s.add(SchemaVersion(version=SCHEMA_VERSION))
+            s.commit()
 
 
 @contextmanager

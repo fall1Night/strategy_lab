@@ -19,6 +19,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     Float,
@@ -27,6 +28,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -64,6 +66,12 @@ class BacktestRun(Base):
         default=lambda: datetime.datetime.now(datetime.timezone.utc),
         index=True,
     )
+    params_hash: Mapped[str | None] = mapped_column(
+        String(40), index=True, nullable=True
+    )  # 参数指纹（规范化 params_json 的 sha1），命中复用依据
+    data_source: Mapped[str | None] = mapped_column(
+        String(32), index=True, nullable=True
+    )  # P0-4：数据源标识（eastmoney/akshare/tushare），运行复用键扩展
 
     equity = relationship("EquityPoint", cascade="all,delete-orphan")
     trades = relationship("Trade", cascade="all,delete-orphan")
@@ -130,3 +138,58 @@ class SchemaVersion(Base):
     applied_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc)
     )
+
+
+class Batch(Base):
+    """批次元信息（v2.0 批量扫描）。与 backtest_runs.batch_id 松关联。"""
+
+    __tablename__ = "batches"
+
+    batch_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    strategy_name: Mapped[str] = mapped_column(String(128), index=True)
+    strategy_type: Mapped[str] = mapped_column(String(64), index=True)
+    params_hash: Mapped[str] = mapped_column(String(40), index=True)
+    scope_type: Mapped[str] = mapped_column(String(16))  # sector / pool / all_market
+    scope_value: Mapped[str] = mapped_column(String(256))  # 板块 codes / 池 symbols / "ALL"
+    total_count: Mapped[int] = mapped_column(Integer, default=0)
+    done_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(
+        String(16), index=True
+    )  # pending/running/done/failed/cancelled/interrupted
+    started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        index=True,
+    )
+    error_msg: Mapped[str | None] = mapped_column(Text)
+
+
+class BatchItem(Base):
+    """批次内每只标的执行状态（v2.0 批量扫描）。"""
+
+    __tablename__ = "batch_items"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "symbol", name="uq_batch_item_symbol"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("batches.batch_id"), index=True
+    )
+    symbol: Mapped[str] = mapped_column(String(32))
+    symbol_name: Mapped[str] = mapped_column(String(128))
+    sector_code: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), index=True
+    )  # pending/running/done/failed/skipped/cancelled
+    run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    is_reused: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_msg: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime)
