@@ -14,46 +14,70 @@ from typing import Any
 import pandas as pd
 
 from .vendor.render_dashboard import build_dashboard_data, render_dashboard, numberFormatPy
+from .strategies import get_strategy_class
 
 
 # --------------------------------------------------------------------------
 # 策略说明 / 局限 文本（由配置生成，参数变更时同步更新）
 # --------------------------------------------------------------------------
 def _note_texts(cfg: dict[str, Any]) -> tuple[str, str, str]:
-    p = cfg["params"]
-    pa = p["entry"]["path_a"]
-    pb = p["entry"]["path_b"]
-    tt = p["t_trade"]
-    comm = p["commission"] * 10000
-    tax = p["stamp_tax"] * 10000
-    t_amt_wan = p["t_buy_amount"] / 10000
+    """生成「策略实现要点」文案，并复用通用的「已知局限与偏差」「免责声明」。
 
-    note = (
-        f"- 建仓（两条平行入口，同一时间仅持有一笔底仓）：\n"
-        f"  路径A：周线MACD柱(hist)<0进入监控区；当某一周hist较上周上涨（动能筑底转强）开始判定；"
-        f"日线KDJ的J线<{pa.get('j_buy', 50)}当日收盘买入底仓；hist回到0轴上方自动解除监控。\n"
-        f"  路径B：周线hist<0 且 周J线<{pb.get('j_below', 30)} 且 本周周J线较上周上涨 "
-        f"→ 当日收盘直接买入底仓（不卡日线J）。\n"
-        f"- 做T（仅看日线J线）：J较近5日高点回落≥{tt.get('drop_from_high', 30)}且仍在下降（J<前日J）当日收盘买{t_amt_wan}万；"
-        f"J反弹（J≥前日J）停止加仓；J>{tt.get('j_sell_threshold', 80)}当日收盘卖光全部加仓部分，底仓不动。\n"
-        f"- 清仓：日线MACD水上死叉（DIF>0且DEA>0且DIF下穿DEA）当日收盘清仓全部。\n"
-        f"- 执行价：当日信号+当日收盘（含 look-ahead 偏差）；A股 T+1 / {p['lot_size']}股整手 / "
-        f"佣金{comm:.0f}bp双边 / 印花税{tax:.0f}bp卖方 / 前复权qfq。\n"
-        f"- 周线信号对齐采用 backward merge（最新 weekly_date ≤ daily_date），周内不使用未来数据。"
-    )
+    分发规则（接口驱动，无 type 字符串硬编码）：
+      - 依据 ``cfg.get("type")`` 取得策略类；若类实现了 ``describe(params)``
+        则由策略类自述「实现要点」；否则回退到通用文案 ``_note_texts_generic``。
+      - 任意取类 / 描述失败都不抛异常，统一回退 generic，保证展示层稳健。
+    """
+    params = cfg.get("params") or {}
+    strategy_type = str(cfg.get("type") or "").strip().lower()
+
+    # 通用：已知局限与偏差（对所有策略一致）
     limit = (
         "- 当日收盘执行存在 look-ahead 偏差（实盘需次日开盘执行）。\n"
         "- 涨跌停未建模（±10%）：极端行情下当日收盘可能无法成交，本回测忽略。\n"
         "- 佣金按配置比例单边计，未设最低5元收费；印花税仅卖方。\n"
-        "- 清仓信号当日强制平仓所有仓位（含当日T加仓），严格T+1下当日买入份额无法卖出，"
-        "本回测为满足期末平仓要求按清仓价强制卖出，该场景极少出现。\n"
         "- 单标的回测，不含选股截面 / 存活偏差讨论。"
     )
     disclaimer = (
         "⚠️ 以上内容由 AI 基于公开信息整理生成，仅供参考，不构成任何投资建议或个股推荐。"
         "投资有风险，决策需谨慎。"
     )
+
+    # 接口驱动：优先用策略类自描述，失败（未知 type / 无 describe）回退 generic
+    note = _note_texts_generic(cfg, params)
+    try:
+        cls = get_strategy_class(strategy_type)
+        if hasattr(cls, "describe"):
+            note = cls.describe(params)
+    except KeyError:
+        # get_strategy_class 对未知 type 抛 KeyError → 已用 generic 兜底
+        pass
+
     return note, limit, disclaimer
+
+
+
+
+def _note_texts_generic(cfg: dict[str, Any], params: dict[str, Any]) -> str:
+    """未知 / 通用策略的兜底文案：绝不因缺键崩溃。"""
+    name = (str(cfg.get("name") or "").strip()) or "本策略"
+    desc = str(cfg.get("description") or "").strip()
+    if desc:
+        core = (
+            f"- 策略：{name}\n"
+            f"- 说明：{desc}\n"
+        )
+    else:
+        core = (
+            f"- 策略：{name}\n"
+            "- 说明：未提供策略描述（description 为空），以通用规则回测；"
+            "具体买卖逻辑与参数请参考策略源码。\n"
+        )
+    return (
+        core
+        + "- 执行价：当日信号 + 当日收盘（含 look-ahead 偏差）；A股 T+1 / 100股整手 / "
+        "佣金双边 / 印花税卖方 / 前复权 qfq。"
+    )
 
 
 def _position_module(result: dict[str, Any]) -> dict[str, Any]:
@@ -83,7 +107,7 @@ def build_single_dashboard(result: dict[str, Any], cfg: dict[str, Any],
         trade_history=result.get("trade_history"),
         summary=result.get("summary"),
         meta={
-            "initial_cash": float(cfg["params"]["initial_cash"]),
+            "initial_cash": float(cfg.get("params", {}).get("initial_cash", 0) or 0),
             "strategy_name": cfg.get("name", ""),
             "market": cfg.get("market", "china_a"),
         },
@@ -100,7 +124,7 @@ def build_single_dashboard(result: dict[str, Any], cfg: dict[str, Any],
 def build_compare_dashboard(results: dict[str, dict[str, Any]], cfg: dict[str, Any],
                             out_path: str | Path, start: str, end: str) -> Path:
     note, limit, disc = _note_texts(cfg)
-    init_cash = float(cfg["params"]["initial_cash"])
+    init_cash = float(cfg.get("params", {}).get("initial_cash", 0) or 0)
 
     # 各标的 report_data（仅取 modules，并改 tab 为该标的 prefix）
     sym_mods = {}

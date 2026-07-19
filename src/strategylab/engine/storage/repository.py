@@ -545,6 +545,38 @@ def list_batches(limit: int = 50) -> list[dict[str, Any]]:
         return [_batch_to_dict(b) for b in rows]
 
 
+def latest_batch_for_strategy(
+    strategy_name: str,
+    params_hash: str | None = None,
+) -> dict[str, Any] | None:
+    """返回某策略（按 ``strategy_name`` + ``params_hash``）最新的批次摘要。
+
+    用于分析查询页「无数据」时的预热引导：若该批次仍在处理中、或刚结束
+    但完成数为 0，则提示用户预热仍在进行，而不是冷冰冰的「没有跑过数据」。
+
+    返回 ``{status, done_count, total_count, created_at}``；若无匹配批次或
+    查询过程中出错，一律返回 ``None``（防御性兜底，绝不影响主查询返回）。
+    """
+    try:
+        init_db()
+        with get_session() as s:
+            q = s.query(Batch).filter(Batch.strategy_name == strategy_name)
+            if params_hash:
+                q = q.filter(Batch.params_hash == params_hash)
+            b = q.order_by(Batch.created_at.desc()).first()
+            if b is None:
+                return None
+            return {
+                "status": b.status,
+                "done_count": int(b.done_count),
+                "total_count": int(b.total_count),
+                "created_at": b.created_at.isoformat() if b.created_at else None,
+            }
+    except Exception:  # noqa: BLE001
+        # 防御性兜底：查询失败绝不影响主查询（rank）的返回
+        return None
+
+
 def mark_interrupted_batches() -> int:
     """启动扫描：把 status='running' 的批次标记为 'interrupted'（重启处理）。"""
     with get_session() as s:
@@ -625,11 +657,17 @@ def rank_runs(
     symbols: list[str] | None = None,
     page: int = 1,
     size: int = 50,
+    sort_by: str | None = None,
+    order: str = "desc",
 ) -> dict[str, Any]:
-    """排名查询（分析页核心）：已落库 run 按总收益率降序，分页 50/页。
+    """排名查询（分析页核心）：已落库 run 分页排序，默认按总收益率降序。
 
     - ``scope``：板块 code（按该板块聚合过滤）或 None/空（全部已跑过的）。
     - ``symbols``：自定义池 symbols（与 scope 互斥，优先于 scope）。
+    - ``sort_by``：排序字段白名单 ``symbol_name`` / ``total_return_pct`` /
+      ``max_drawdown_pct`` / ``sharpe`` / ``win_rate_pct``；为 None 或非法值时
+      保持默认排序（total_return_pct 降序，向后兼容）。
+    - ``order``：``"asc"`` 升序 / ``"desc"`` 降序；字段值为 None 的统一排到最后。
     - 返回 ``{items, total, miss_count}``；``miss_count`` 仅当 scope 为板块 code 时有效。
     """
     init_db()
@@ -684,6 +722,11 @@ def rank_runs(
                     "sharpe": (
                         float(summ.sharpe) if summ and summ.sharpe is not None else None
                     ),
+                    "win_rate_pct": (
+                        float(summ.win_rate_pct)
+                        if summ and summ.win_rate_pct is not None
+                        else None
+                    ),
                     "end": r.end.isoformat() if r.end else None,
                     "stale": stale,
                     "_created_at": r.created_at,  # 去重辅助字段
@@ -697,7 +740,26 @@ def rank_runs(
             prev = seen.get(sym)
             if prev is None or item["_created_at"] > prev["_created_at"]:
                 seen[sym] = item
-        items = sorted(seen.values(), key=lambda x: x["total_return_pct"] or 0, reverse=True)
+        items = list(seen.values())
+
+        # 排序（在去重后的 items 上做，None 统一排末尾，最小改动且可靠）
+        _ALLOWED_SORT = {
+            "symbol_name",
+            "total_return_pct",
+            "max_drawdown_pct",
+            "sharpe",
+            "win_rate_pct",
+        }
+        if sort_by in _ALLOWED_SORT:
+            _reverse = order == "desc"
+            _body = [x for x in items if x.get(sort_by) is not None]
+            _nils = [x for x in items if x.get(sort_by) is None]
+            _body.sort(key=lambda x: x[sort_by], reverse=_reverse)
+            items = _body + _nils
+        else:
+            # 默认行为：按总收益率降序（保持向后兼容）
+            items = sorted(items, key=lambda x: x["total_return_pct"] or 0, reverse=True)
+
         # 清理辅助字段
         for item in items:
             item.pop("_created_at", None)

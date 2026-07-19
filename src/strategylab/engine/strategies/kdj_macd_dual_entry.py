@@ -25,6 +25,33 @@ from ..indicators import compute_kdj, compute_macd
 class KdjMacdDualEntry(BaseStrategy):
     type = "kdj_macd_dual_entry"
 
+    # ------------------------------------------------------------------ describe
+    @staticmethod
+    def describe(params: dict) -> str:
+        """周线MACD+日线KDJ 双入口做T 策略说明（功能不变，键访问全部兜底）。"""
+        entry = params.get("entry") or {}
+        pa = entry.get("path_a") or {}
+        pb = entry.get("path_b") or {}
+        tt = params.get("t_trade") or {}
+        comm = (params.get("commission") or 0) * 10000
+        tax = (params.get("stamp_tax") or 0) * 10000
+        lot_size = params.get("lot_size") or 100
+        t_amt_wan = (params.get("t_buy_amount") or 0) / 10000
+
+        return (
+            f"- 建仓（两条平行入口，同一时间仅持有一笔底仓）：\n"
+            f"  路径A：周线MACD柱(hist)<0进入监控区；当某一周hist较上周上涨（动能筑底转强）开始判定；"
+            f"日线KDJ的J线<{pa.get('j_buy', 50)}当日收盘买入底仓；hist回到0轴上方自动解除监控。\n"
+            f"  路径B：周线hist<0 且 周J线<{pb.get('j_below', 30)} 且 本周周J线较上周上涨 "
+            f"→ 当日收盘直接买入底仓（不卡日线J）。\n"
+            f"- 做T（仅看日线J线）：J较近5日高点回落≥{tt.get('drop_from_high', 30)}且仍在下降（J<前日J）当日收盘买{t_amt_wan}万；"
+            f"J反弹（J≥前日J）停止加仓；J>{tt.get('j_sell_threshold', 80)}当日收盘卖光全部加仓部分，底仓不动。\n"
+            f"- 清仓：日线MACD水上死叉（DIF>0且DEA>0且DIF下穿DEA）当日收盘清仓全部。\n"
+            f"- 执行价：当日信号+当日收盘（含 look-ahead 偏差）；A股 T+1 / {lot_size}股整手 / "
+            f"佣金{comm:.0f}bp双边 / 印花税{tax:.0f}bp卖方 / 前复权qfq。\n"
+            f"- 周线信号对齐采用 backward merge（最新 weekly_date ≤ daily_date），周内不使用未来数据。"
+        )
+
     # ------------------------------------------------------------------ helpers
     def _fee_cost(self, size, price):
         return size * price * (1 + self.commission)
@@ -137,6 +164,7 @@ class KdjMacdDualEntry(BaseStrategy):
         last_entryb_week_date = None
         trade_history: list = []
         equity_curve: list = []
+        peak_total_value: float = 0.0  # 持仓期间总资产峰值（用于 6% 回撤清仓）
 
         eval_start_ts = pd.Timestamp(start)
         eval_end_ts = pd.Timestamp(end)
@@ -160,8 +188,18 @@ class KdjMacdDualEntry(BaseStrategy):
 
             holding = (base_shares > 0) or (t_shares > 0)
 
-            # 1. 清仓（最高优先级）
-            if holding and clear_sig and exit_cfg.get("daily_macd_water_death_cross", True):
+            # 峰值回落检测（持仓期间总资产从最高点回落 >= 6% → 清仓）
+            current_value = cash + (base_shares + t_shares) * close
+            if current_value > peak_total_value:
+                peak_total_value = current_value
+            peak_drop = peak_total_value > 0 and (peak_total_value - current_value) >= peak_total_value * 0.06
+
+            # 1. 清仓（最高优先级）：MACD 水上死叉 或 峰值回落 6%，满足其一即清
+            exit_cond = (
+                (clear_sig and exit_cfg.get("daily_macd_water_death_cross", True))
+                or peak_drop
+            )
+            if holding and exit_cond:
                 exit_price = close
                 if t_shares > 0 and t_lots:
                     cash += self._close_t(t_lots, exit_price, date_str, i, trade_history, label="T加仓(清仓)")
@@ -172,6 +210,7 @@ class KdjMacdDualEntry(BaseStrategy):
                     base_shares = 0
                     base_trade = None
                 monitoring_armed = False
+                peak_total_value = 0.0
                 equity_curve.append({"date": date_str, "value": round(cash, 2)})
                 continue
 
@@ -211,11 +250,13 @@ class KdjMacdDualEntry(BaseStrategy):
                     size = int(base_buy / close)
                     size = (size // self.lot_size) * self.lot_size
                     if size > 0:
-                        cash -= self._fee_cost(size, close)
+                        cost_ = self._fee_cost(size, close)
+                        cash -= cost_
                         base_shares = size
                         pid_counter += 1
                         base_trade = {"entry_date": date_str, "entry_price": close, "size": size,
                                       "entry_bar": i, "position_id": pid_counter}
+                        peak_total_value = cash + size * close  # 建仓时设初始峰值
                         monitoring_armed = False
                         bought_a = True
                 # 路径B
@@ -227,11 +268,13 @@ class KdjMacdDualEntry(BaseStrategy):
                         size = int(base_buy / close)
                         size = (size // self.lot_size) * self.lot_size
                         if size > 0:
-                            cash -= self._fee_cost(size, close)
+                            cost_b = self._fee_cost(size, close)
+                            cash -= cost_b
                             base_shares = size
                             pid_counter += 1
                             base_trade = {"entry_date": date_str, "entry_price": close, "size": size,
                                           "entry_bar": i, "position_id": pid_counter}
+                            peak_total_value = cash + size * close  # 建仓时设初始峰值
             equity_curve.append({"date": date_str, "value": round(cash + (base_shares + t_shares) * close, 2)})
 
         # 期末强制平仓

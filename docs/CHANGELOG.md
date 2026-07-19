@@ -133,3 +133,119 @@
 - `docs/使用指南.md`：新增 §10.5 v2.0 批量扫描与排名（数据生产页/分析查询页操作说明，大白话）。
 - **`docs/v2.0-design.md`（NEW）：v2.0 完整设计方案汇总**（升级背景、已确认决策、数据模型、命中复用算法、API、前端两页、执行流程、并发性能、缓存修复、任务清单、文件清单、风险）。
 - 本文件追加「六、v2.0 大更新」章节。
+
+---
+
+## 七、2026-07-19 多数据源抽象层 + 风控增强（完整 SOP 交付）
+
+### 22. 多数据源抽象层（PRD + 架构 + 实现 + QA 全链路）
+- **PRD**（许清楚）：`docs/multidatasource-prd.md` — 产品目标 G1~G3、用户故事、P0/P1/P2 需求池、`.env+CLI` 配置方案。
+- **架构**（高见远）：`docs/multidatasource-arch.md` + `multidatasource-class.mermaid` + `multidatasource-sequence.mermaid` — 抽象基类(模板方法)+适配器+工厂+容灾策略四件套。
+- **实现**（寇豆码 IS_PASS: YES）：13 个新建文件（`src/strategylab/engine/datasource/` 子包）+ 10 个修改文件。
+  - 东财 100% 保留为默认源，限流/熔断改为每源独立。
+  - `data_feed.py` 改造为兼容层 shim，调用方零改动。
+  - 缓存文件名带 source（`<prefix>_<source>_<period>.csv`），旧缓存兼容回退。
+  - 运行复用键扩展为含 `data_source` 字段 + 历史回填 eastmoney。
+- **QA**（严过关 74/74 NoOne）：全量回归测试覆盖导入/兼容层/缺依赖报错/东财适配器/工厂配置/缓存 key/CLI/DB 迁移。
+
+### 23. 收益率颜色统一（前端）
+- 将全平台收益率颜色统一为：**正收益红色 `#f87171`、负收益绿色 `#4ade80`**（与详情页一致）。
+- 涉及侧边栏 `.rval`、分析页 `.rtab`、历史页列表共 3 处 CSS 修复 + 历史页补加颜色类。
+- 新增 `Cache-Control: no-store` 头，防止浏览器样式缓存导致用户看不到更新。
+
+### 24. 启动体验优化
+- 新增 `src/strategylab/__main__.py`：`python -m strategylab` 等价于 `python -m strategylab.web`。
+- 新增 `restart.bat`（纯英文，双击即用）：自动杀 8000 端口旧进程 → 等待释放 → 重启服务。
+- 新增 `restart.sh`（Git Bash 用户专享）。
+- `ThreadingHTTPServer.allow_reuse_address = True`：解决快速重启时 TIME_WAIT 导致的端口绑定失败。
+
+### 25. 取消按钮交互优化（前端）
+- `cancelBatch()` 改为：立即停止轮询 → 按钮禁用/变灰 → 显示"取消请求已发送"，不再只会 alert。
+- 新增 `_cancelling` 状态锁，防止重复点击。
+
+### 26. 策略修改：峰值回撤清仓 + 做T确认两万
+- 新增清仓条件：持仓期间监控总资产峰值，从最高点回落 ≥ 6% 时强制清仓。与原 MACD 水上死叉条件为"或"关系，满足其一即清。
+- 建仓时设初始峰值、清仓时复位、做T加仓自动更新峰值。
+- 做T单笔买入额确认为 `t_buy_amount = 20000`（配置 `kdj_macd_dual_entry.toml`）。
+- 清空所有历史数据（`TRUNCATE 6 张 MySQL 表 + rm -rf data/*`），重跑。
+
+### 27. 板块成分股清理
+- 从 `data/sector_stocks.json` 移除非沪深主板/创业板的股票（科创板 688/北交所 8/B 股等）。
+- 保留规则：`sh60xxxx`（沪主板） + `sz00xxxx`（深主板） + `sz30xxxx`（创业板）。
+- 数量变化：**5527 → 4590**，移除 937 只。
+
+### 28. 请求反识别与防拉黑机制（核心增强）
+- **随机 UA/Referer 池**：8 款浏览器 UA + 6 个 Referer 来源，每次请求随机组合（`base.py` → `random_headers()`）。
+- **限流间隔 2.0s + 0~3s 随机抖动**：可配置 `STRATEGALAB_DATASOURCE_GAP`。
+- **10% 概率完全跳过**：让请求节奏进一步稀疏化、不可预测。
+- **熔断阈值 8→3 次**：连续 3 次失败即触发冷却，起始冷却 60s，翻倍上限 600s。
+- **akshare 适配器切到新浪源**：因东财 IP 被封，`stock_zh_a_hist`(东财) 改为 `stock_zh_a_daily`(新浪)，周线由日线聚合生成。
+- **`.env` 默认数据源改为 `akshare`**：彻底绕过被封的东财。
+
+### 文档同步（多数据源 + 风控增强）
+- 本文件追加「七、2026-07-19 多数据源抽象层 + 风控增强」章节。
+- `docs/需求文档.md`：追加 §7 多数据源需求 + §8 风控与策略需求。
+- `docs/技术文档.md`：追加 §16 多数据源扩展 + §17 请求反识别与防拉黑。
+- `docs/使用指南.md`：追加 §10.6 数据源切换 + §10.7 服务重启 + §10.8 风险控制。
+
+---
+
+## 八、2026-07-19 网页交互与全市场预热增强（文档同步）
+
+### 29. 分析查询页新增「胜率」列 + 列头可排序 + 修复第 2 页无数据
+- **后端 `repository.py` 的 `rank_runs()`**：返回 items 新增 `win_rate_pct` 字段（取自 `Summary.win_rate_pct`，None 存 None）；新增参数 `sort_by: str|None=None` 与 `order: str="desc"`，`sort_by` 白名单 = `symbol_name` / `total_return_pct` / `max_drawdown_pct` / `sharpe` / `win_rate_pct`，非白名单或 None 时保持原默认（按 `total_return_pct` 降序，向后兼容）；`order` 仅接受 `asc`/`desc`；排序在去重后 items 上做，字段值为 None 的统一排到末尾（避免比较报错）。
+- **后端 `web.py` 的 `_api_rank()`**：从 query 解析 `sort_by`/`order`（order 非法时回退 desc）并透传给 `rank_runs`；CSV 导出分支同样透传。
+- **前端 `web.py` 的 `build_analysis_html()`**：表格新增「胜率」列（位于「夏普」之后、「数据时效」之前，不参与正负着色）；五个列头（股票名称 / 总收益率 / 最大回撤 / 夏普 / 胜率）均可点击排序，当前排序列显示 ▲/▼ 金色高亮，切换后页码重置回第 1 页；重写翻页逻辑修复「第 2 页无数据」——页码守卫、fetch 始终带 `sort_by/order`、空数据守卫、翻页器必渲染、`pages=Math.ceil(total/50)`。
+- **验证**：QA 独立离线回归 IS_PASS=YES；后端分页离线 + 线上实测均正常（page=2 返回 50 条），前端逐行静态审查通过。
+
+### 30. 详情页持仓 / 交易明细表头滚动固定（sticky header）
+- **文件**：`src/strategylab/engine/vendor/dashboard_template.html`（纯 CSS 调整，未动 JS / HTML 结构 / 后端）。
+- **根因**：模板 `thead th` 本已有 `position:sticky; top:0`，但①包裹层 `.trades-table-wrap`（原仅 `overflow-x:auto`）、`.position-table-wrap`（原仅 `overflow-x:hidden`）无 `max-height` 也无 `overflow-y`，sticky 缺少吸附容器；②表头 `background:transparent`，吸附后透穿下方行，表头不固定。
+- **修复**：给两个包裹层加 `max-height:62vh` + `overflow-y:auto`（制造纵向滚动容器）；表头 `background` 由 `transparent` 改为 `var(--surface, #161b22)`（不透明，与卡片色协调），新增 `z-index:2` + `box-shadow` 兜底边框。短表（<62vh）无副作用，长表表头吸顶。
+- **验证**：QA 静态核验 IS_PASS=YES；`--surface` 在 dark/light 主题均有定义（dark=#161b22），颜色协调无风险。⚠️ 注意：`data/index.html` 是旧产物，需重启服务重渲后新表头才生效。
+
+### 31. 全市场预热市值过滤脚本 + 预热宇宙口径校正
+- **新增脚本** `scripts/filter_by_market_cap.py`：可按总市值过滤 `data/sector_stocks.json`，自适应数据源、`ThreadPoolExecutor` 并发、本地续传缓存、防空写保护；可用 `MIN_CAP` / `MAX_CAP` / `WORKERS` 环境变量调参。
+- **取消批次功能**：经核验，当前代码「取消不了」问题已不存在——`web.py` 取消按钮已带 `id="cancel-btn"`、`cancelBatch()` 已做 DOM 空值保护、`beginBatch()` 已设 `curBatchId`、后端 `threading.Event` 取消机制完好，QA 实测小批次取消 → 状态变 `cancelled`、轮询停止。本次未做多余代码改动（最小变更）。
+- **当前预热宇宙口径**：实际 `data/sector_stocks.json` 仅 **1301 只**（31 个板块、每只 `{code,name}`），经百度源逐只核实全部 1301 只市值 min=100.0 亿 / max=993.01 亿 / 中位数≈193 亿，**已全部落在 100~1000 亿中盘区间**，已符合用户「只保留 100 亿~1000 亿」诉求（按现有文件过滤为「零剔除」）。用户已确认保持 1301 只现状。
+
+文档同步（网页交互与预热增强）
+- 本文件追加「八、2026-07-19 网页交互与全市场预热增强」章节（§29 / §30 / §31）。
+- `docs/技术文档.md`：§15.3 补充 `/api/rank` 的 `sort_by`/`order` 与 `win_rate_pct` 返回字段；§8 补充详情页表头 sticky；§15.7 分析页补充胜率列与列头排序。
+- `docs/需求文档.md`：FR-21 补充胜率列 / 列头排序 / 翻页修复；FR-20 补充 `sort_by`/`order`；FR-08 附近补充详情页表头 sticky；FR-15 的 5500→1301 校正。
+- `docs/使用指南.md`：§10.5.2 校正全市场预热数量为 1301 只并补充市值过滤脚本；§10.5.3 补充胜率列 / 列头排序 / 翻页修复；§10.1 补充表头 sticky；两处 5500→1301 校正。
+
+---
+
+## 九、2026-07-19 多策略维护结构重构（M1+M2）+ 体验修复
+
+### 32. 分析查询页空结果「预热中」引导（体验修复）
+- **根因**：选策略点「查看详情 / 排名」遇到空结果时，页面只有"暂无已跑过的回测"一句话，无法区分"真没跑"还是"正在跑"，易被误判为 Bug。
+- **改动**：`engine/storage/repository.py` 新增 `latest_batch_for_strategy(strategy_name, params_hash=None) -> dict|None`（只读，try/except 兜底）；`web.py` 的 `_api_rank` 在 `total==0` 时附加 `warmup` 信息；前端 `loadRank` 空结果分支按 `warmup.in_progress` 显示"预热仍在进行中（已完成 X/Y）"引导。
+- **验证**：QA 独立回归 NoOne；未重启、未触碰运行中进程（改动仅下次重启生效）。
+
+### 33. 海龟策略「查看详情」`KeyError: 'entry'`（Bug 修复）
+- **根因**：`engine/dashboard.py` 的 `_note_texts(cfg)` 写死读取 KDJ 双入口策略专用键 `cfg["params"]["entry"]["path_a"]`；海龟配置无 `entry` 键，点详情渲染仪表盘即抛 `KeyError`，被 except 捕获后返回 HTTP 500。
+- **修复**：该硬编码分支已由 M1 重构（§34）**结构性消除**；海龟详情现由策略类 `describe()` 自描述，不再依赖任何 KDJ 专用键。
+- **验证**：QA 独立回归 35/35 NoOne（含真实海龟 run 详情构建不报错、文案要点齐全）。
+
+### 34. 多策略维护结构重构 M1：展示层去硬编码（策略自描述）
+- **目标**：消除"每加一个策略就要在 `dashboard.py` 手写文案分支"的繁琐，根治 §33 类问题。
+- **改动**：
+  - `engine/strategies/turtle.py` / `kdj_macd_dual_entry.py` 各新增 `@staticmethod describe(params) -> str`，原"策略实现要点"文案原样搬入（内容不变）。
+  - `engine/dashboard.py` 的 `_note_texts(cfg)` 改为**接口驱动**：`cls = get_strategy_class(cfg["type"])`；若 `hasattr(cls, "describe")` 则 `note = cls.describe(params)`，否则回退 `_note_texts_generic`；**删除** `_note_texts_turtle` / `_note_texts_kdj` 两函数，以及 `if type=="turtle"…elif…"海龟" in strategy_name` 的类型字符串 + 名称子串兜底分发。
+  - 返回结构 `(note, limit, disc)` 三元组不变；通用"已知局限与偏差""免责声明"两段保留。
+
+### 35. 多策略维护结构重构 M2：类注册自动发现
+- **目标**：消除"每加一个策略就要手工改 `STRATEGY_REGISTRY` 注册"的繁琐，并根除"配置自动发现 / 类手工注册"双真相源不一致的隐患。
+- **改动**：`engine/strategies/__init__.py` 删除手写 `STRATEGY_REGISTRY` 字典，改为 `discover_strategies()` 在导入时扫描本目录 `*.py` 收集 `BaseStrategy` 子类、以 `cls.type` 建表（排除 `base`/抽象/未设 `type`）；`STRATEGY_REGISTRY` 由其构建；`get_strategy_class` / `list_strategies` 签名与返回语义**完全保留**。
+- **冲突防御**：两个类 `type` 冲突时导入即抛清晰 `TypeError`（含冲突类型名与两个类名），不静默覆盖。
+- **收益量化**：新增策略从「2 新文件 + 2 改中心文件 + ≥2 硬编码分支 + 1 漏注册风险」收敛为「2 新文件、0 改中心文件、0 硬编码分支」。
+- **验证**：工程师 IS_PASS: YES；QA 独立回归 35/35 NoOne（含"临时放 demo 策略不碰 `__init__.py` 即被自动发现"、type 冲突清晰报错）。
+
+### 文档同步（多策略结构重构 + 体验修复）
+- 本文件追加「九、2026-07-19 多策略维护结构重构（M1+M2）+ 体验修复」章节（§32 / §33 / §34 / §35）。
+- `README.md` §3.3「新增一种全新策略逻辑」：移除"在 `__init__.py` 登记注册表"步骤，改为"自动发现、零中心改动"，补充可选 `describe()` 说明。
+- `docs/技术文档.md`：§5.1 注册表描述改为自动发现；§9.3 toml `type` 注释改为"唯一、自动发现建表"；§13.2 新增策略步骤同步移除手工登记、补充 `describe()` 与冲突报错提示；模块表 `__init__.py` 一行改为 `discover_strategies()`。
+- `docs/strategy-maintenance-review.md`：补充「实施状态」——M1+M2 已于本次会话实施完成（工程师 IS_PASS: YES，QA 独立回归 35/35 NoOne），M3（toml `notes` 纯配置变体）保持待定。
+- 配套评审与设计文档：`docs/strategy-maintenance-review.md`（架构评审 + 增量迁移路线 M1→M2→M3）。

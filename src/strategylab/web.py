@@ -596,11 +596,11 @@ __STRAT_OPTS__
     </div>
 
     <div id="scope-sector">
-      <label for="sector-multi">选择板块（可多选，Ctrl/⌘ 多选）</label>
+      <label for="sector-multi">选择板块（点击选中，按住 Ctrl 可多选）</label>
       <select id="sector-multi" multiple size="8">
 __SECTOR_OPTS__
       </select>
-      <div class="hint">所选板块的全部成分股将纳入本次批量扫描；跨板块去重。</div>
+      <div class="hint">所选板块的全部成分股将纳入本次批量扫描；跨板块去重。若未看到板块列表，请确认服务已正确启动。</div>
     </div>
 
     <div id="scope-pool" style="display:none">
@@ -628,7 +628,7 @@ __SECTOR_OPTS__
         <span>预计剩余：<b id="prog-eta">—</b></span>
       </div>
     </div>
-    <button type="button" class="ghost" onclick="cancelBatch()">取消批次</button>
+    <button type="button" class="ghost" id="cancel-btn" onclick="cancelBatch()">取消批次</button>
     <div class="note" id="prog-done-msg" style="display:none">
       ✅ 批次已完成。前往 <a href="/analysis">分析查询页</a> 查看收益排名。
     </div>
@@ -725,17 +725,16 @@ var _cancelling=false;
 function cancelBatch(){
   if(!curBatchId || _cancelling) return;
   _cancelling=true;
-  document.getElementById('cancel-btn').disabled=true;
-  document.getElementById('cancel-btn').textContent='取消中...';
+  var btn=document.getElementById('cancel-btn');
+  if(btn){ btn.disabled=true; btn.textContent='取消中...'; }
   clearInterval(pollTimer); pollTimer=null;
   fetch('/api/batch/'+curBatchId+'/cancel',{method:'POST'}).then(function(){
-    document.getElementById('prog-status').textContent='cancelling';
-    document.getElementById('prog-done-msg').innerHTML='✅ 取消请求已发送，正在停止中...';
-    document.getElementById('prog-done-msg').style.display='block';
+    var st=document.getElementById('prog-status'); if(st){ st.textContent='cancelling'; }
+    var dm=document.getElementById('prog-done-msg');
+    if(dm){ dm.innerHTML='✅ 取消请求已发送，正在停止中...'; dm.style.display='block'; }
   }).catch(function(){
     _cancelling=false;
-    document.getElementById('cancel-btn').disabled=false;
-    document.getElementById('cancel-btn').textContent='取消批次';
+    if(btn){ btn.disabled=false; btn.textContent='取消批次'; }
   });
 }
 function loadSectorStatus(){
@@ -817,6 +816,9 @@ def build_analysis_html() -> str:
   .rtab { width:100%; border-collapse:collapse; font-size:13px; }
   .rtab th, .rtab td { border-bottom:1px solid #1e293b; padding:10px 10px; text-align:left; cursor:pointer; }
   .rtab th { color:#93c5fd; cursor:default; }
+  .rtab th.sortable { cursor:pointer; user-select:none; white-space:nowrap; }
+  .rtab th.sortable:hover { color:#bfdbfe; text-decoration:underline; }
+  .rtab th.sorted { color:#fbbf24; }
   .rtab tr:hover { background:#172033; }
   .rtab .pos { color:#f87171; }
   .rtab .neg { color:#4ade80; }
@@ -855,45 +857,78 @@ __SCOPE_OPTS__
 </div>
 <script>
 var curStrategy='', curScope='', curSymbols='';
+var curSortBy='total_return_pct', curSortDir='desc';
 function loadRank(page){
+  if(page==null||isNaN(page)||page<1) page=1;
   curStrategy=document.getElementById('strategy').value;
   curScope=document.getElementById('scope-sel').value;
   curSymbols=document.getElementById('pool-symbols').value.trim();
-  var qs='strategy='+encodeURIComponent(curStrategy)+'&page='+page+'&size=50';
+  var qs='strategy='+encodeURIComponent(curStrategy)
+    +'&page='+page+'&size=50'
+    +'&sort_by='+encodeURIComponent(curSortBy)+'&order='+encodeURIComponent(curSortDir);
   if(curScope) qs+='&scope='+encodeURIComponent(curScope);
   if(curSymbols) qs+='&symbols='+encodeURIComponent(curSymbols);
   fetch('/api/rank?'+qs).then(function(r){return r.json();}).then(function(d){
-    var items=d.items||[], total=d.total||0, miss=d.miss_count;
+    var items=d.items||[], total=d.total||0, miss=d.miss_count, warmup=d.warmup||null;
+    var stratSel=document.getElementById('strategy');
+    var stratName=(stratSel && stratSel.selectedIndex>=0 ? stratSel.options[stratSel.selectedIndex].text : '') || curStrategy;
     document.getElementById('rank-summary').innerHTML = '共 <b>'+total+'</b> 只已跑过'
       + (miss!=null ? '，还有 <b>'+miss+'</b> 只未跑（<a href="/production">去数据生产页发起</a>）' : '');
     var box=document.getElementById('rank-table');
-    if(!items.length){ box.innerHTML='<div class="empty">暂无已跑过的回测（请先在数据生产页发起）</div>'; document.getElementById('rank-pager').innerHTML=''; return; }
-    var h='<table class="rtab"><tr><th>股票名称</th><th>总收益率</th><th>最大回撤</th><th>夏普</th><th>数据时效</th></tr>';
-    h+=items.map(function(it){
-      var tr = it.total_return_pct==null?'—':(it.total_return_pct>=0?'+':'')+Number(it.total_return_pct).toFixed(2)+'%';
-      var cls = (it.total_return_pct!=null && it.total_return_pct>=0)?'pos':'neg';
-      var dd = it.max_drawdown_pct==null?'—':Number(it.max_drawdown_pct).toFixed(2)+'%';
-      var sh = it.sharpe==null?'—':Number(it.sharpe).toFixed(2);
-      var stale = it.stale?'<span class="stale">数据较旧，建议重跑</span>':'';
-      return '<tr onclick="openRun(\\''+it.run_id+'\\')"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+stale+'</td></tr>';
-    }).join('');
+    var pager=document.getElementById('rank-pager');
+    if(!items || !items.length){
+      if(warmup && warmup.in_progress){
+        box.innerHTML='<div class="empty">「'+stratName+'」的预热仍在进行中（已完成 '+warmup.done+'/'+warmup.total+'），数据入库后刷新本页即可查看；若预热已结束仍无数据，请到「<a href="/production">数据生产</a>」页重新发起全市场预热。</div>';
+      } else {
+        box.innerHTML='<div class="empty">暂无已跑过的回测（请先在数据生产页发起）</div>';
+      }
+      pager.innerHTML=''; return;
+    }
+    var h='<table class="rtab">'+headerHtml();
+    h+=items.map(rowHtml).join('');
     h+='</table>';
     box.innerHTML=h;
     var pages=Math.max(1, Math.ceil(total/50));
-    document.getElementById('rank-pager').innerHTML='<button onclick="loadRank('+(page-1)+')" '+(page<=1?'disabled':'')+'>上一页</button>'
+    pager.innerHTML='<button type="button" onclick="loadRank('+(page-1)+')" '+(page<=1?'disabled':'')+'>上一页</button>'
       +' <span>第 '+page+' / '+pages+' 页</span> '
-      +'<button onclick="loadRank('+(page+1)+')" '+(page>=pages?'disabled':'')+'>下一页</button>';
+      +'<button type="button" onclick="loadRank('+(page+1)+')" '+(page>=pages?'disabled':'')+'>下一页</button>';
   }).catch(function(){ document.getElementById('rank-table').innerHTML='<div class="empty">加载失败</div>'; });
+}
+function sortBy(col){
+  if(col===curSortBy){ curSortDir=(curSortDir==='desc'?'asc':'desc'); }
+  else { curSortBy=col; curSortDir=(col==='symbol_name'?'asc':'desc'); }
+  loadRank(1);
+}
+function headerHtml(){
+  var cols=[['symbol_name','股票名称',true],['total_return_pct','总收益率',true],['max_drawdown_pct','最大回撤',true],['sharpe','夏普',true],['win_rate_pct','胜率',true],['','数据时效',false]];
+  return '<tr>'+cols.map(function(c){
+    var key=c[0], label=c[1], sortable=c[2];
+    if(!sortable) return '<th>'+label+'</th>';
+    var ind=(key===curSortBy)?(curSortDir==='asc'?' ▲':' ▼'):'';
+    var cls=' class="sortable'+(key===curSortBy?' sorted':'')+'"';
+    return '<th'+cls+' data-col="'+key+'" onclick="sortBy(this.dataset.col)">'+label+ind+'</th>';
+  }).join('')+'</tr>';
+}
+function rowHtml(it){
+  var tr=it.total_return_pct==null?'—':(it.total_return_pct>=0?'+':'')+Number(it.total_return_pct).toFixed(2)+'%';
+  var cls=(it.total_return_pct!=null && it.total_return_pct>=0)?'pos':'neg';
+  var dd=it.max_drawdown_pct==null?'—':Number(it.max_drawdown_pct).toFixed(2)+'%';
+  var sh=it.sharpe==null?'—':Number(it.sharpe).toFixed(2);
+  var wr=it.win_rate_pct==null?'—':Number(it.win_rate_pct).toFixed(2)+'%';
+  var stale=it.stale?'<span class="stale">数据较旧，建议重跑</span>':'';
+  return '<tr data-rid="'+it.run_id+'" onclick="openRun(this.dataset.rid)"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+wr+'</td><td>'+stale+'</td></tr>';
 }
 function openRun(rid){ window.open('/history?run_id='+rid); }
 function exportCsv(){
-  var qs='strategy='+encodeURIComponent(curStrategy)+'&export=csv';
+  var qs='strategy='+encodeURIComponent(curStrategy)+'&export=csv'
+    +'&sort_by='+encodeURIComponent(curSortBy)+'&order='+encodeURIComponent(curSortDir);
   if(curScope) qs+='&scope='+encodeURIComponent(curScope);
   if(curSymbols) qs+='&symbols='+encodeURIComponent(curSymbols);
   window.open('/api/rank?'+qs);
 }
 document.getElementById('strategy').addEventListener('change',function(){ loadRank(1); });
 document.getElementById('scope-sel').addEventListener('change',function(){ loadRank(1); });
+document.getElementById('pool-symbols').addEventListener('change',function(){ loadRank(1); });
 window.addEventListener('DOMContentLoaded', function(){ loadRank(1); });
 </script>
 </body>
@@ -1016,6 +1051,9 @@ class Handler(BaseHTTPRequestHandler):
         scope = (params.get("scope", [""])[0] or "").strip() or None
         ph = (params.get("params_hash", [""])[0] or "").strip() or None
         export = (params.get("export", [""])[0] or "").strip()
+        sort_by = (params.get("sort_by", [""])[0] or "").strip() or None
+        order_raw = (params.get("order", ["desc"])[0] or "desc").strip()
+        order = order_raw if order_raw in ("asc", "desc") else "desc"
         try:
             page = int((params.get("page", ["1"])[0] or "1"))
         except ValueError:
@@ -1043,13 +1081,32 @@ class Handler(BaseHTTPRequestHandler):
         )
         if export == "csv":
             data = storage_repo.rank_runs(
-                strategy_name, ph, scope=scope, symbols=symbols, page=1, size=100000
+                strategy_name, ph, scope=scope, symbols=symbols, page=1, size=100000,
+                sort_by=sort_by, order=order,
             )
             self._send_csv(_ranks_to_csv(data["items"]), f"rank_{strategy_name}.csv")
             return
         data = storage_repo.rank_runs(
-            strategy_name, ph, scope=scope, symbols=symbols, page=page, size=size
+            strategy_name, ph, scope=scope, symbols=symbols, page=page, size=size,
+            sort_by=sort_by, order=order,
         )
+        if data["total"] == 0:
+            latest = storage_repo.latest_batch_for_strategy(strategy_name, ph)
+            if latest is not None and (
+                latest["status"] == "running"
+                or (
+                    latest["status"] in ("done", "cancelled", "interrupted")
+                    and latest["done_count"] < latest["total_count"]
+                )
+            ):
+                data["warmup"] = {
+                    "in_progress": True,
+                    "status": latest["status"],
+                    "done": latest["done_count"],
+                    "total": latest["total_count"],
+                }
+            else:
+                data["warmup"] = None
         self._send_json(data)
 
     def _api_sector_status(self):
@@ -1369,6 +1426,8 @@ def main():
     db.init_db()  # 触发 v1→v2 迁移（幂等）
     batch_runner.init_batch_runner()  # 重启处理：running → interrupted
 
+    # 允许地址重用，避免服务快速重启时 TIME_WAIT 端口无法绑定
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     logger.info("量化回测服务已启动 → http://localhost:%s (Ctrl+C 停止)", PORT)
     try:

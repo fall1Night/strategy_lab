@@ -117,9 +117,11 @@ strategylab --strategy /path/to/my_variant.toml --symbols 002001.SZ --start 2023
 ```
 
 ### 新增一种全新策略逻辑
-1. 在 `src/strategylab/engine/strategies/` 下新建一个类，继承 `BaseStrategy`，设置类属性 `type`，实现 `run(daily, weekly, start, end, symbol, symbol_name)` 返回 `{"equity_curve","trade_history","positions"}`。
-2. 在 `src/strategylab/engine/strategies/__init__.py` 的 `STRATEGY_REGISTRY` 里登记 `type → 类`。
+1. 在 `src/strategylab/engine/strategies/` 下新建一个 `.py` 文件，定义继承 `BaseStrategy` 的子类，设置类属性 `type`，实现 `run(daily, weekly, start, end, symbol, symbol_name)` 返回 `{"equity_curve","trade_history","positions"}`。
+2. （可选）在策略类上实现 `@staticmethod describe(params) -> str`，返回「策略实现要点」文案——它会在分析查询的详情页仪表盘里展示。不实现则自动回退到通用文案。
 3. 写一份对应的 `.toml`（`type` 字段与类名一致），放到内置 `resources/strategies/` 或 `STRATEGALAB_STRATEGIES_DIR`。
+
+> ✅ **无需再手工登记注册表**：`engine/strategies/__init__.py` 现通过 `discover_strategies()` 在导入时自动扫描本目录所有 `BaseStrategy` 子类、并以 `cls.type` 建表；新策略只要类文件存在、设了 `type`，即被自动发现，**零中心文件改动**。若两个类 `type` 冲突，导入时会抛清晰的 `TypeError` 提示（含冲突类型名与两个类名）。
 
 ---
 

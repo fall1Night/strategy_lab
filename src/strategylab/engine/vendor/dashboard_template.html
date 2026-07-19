@@ -642,7 +642,7 @@
       font-weight: 500;
     }
 
-    .trades-table-wrap { overflow-x: auto; }
+    .trades-table-wrap { max-height: 62vh; overflow-x: auto; overflow-y: auto; }
     .trades-table {
       width: 100%;
       border-collapse: collapse;
@@ -674,11 +674,13 @@
       font-size: 12px;
       text-transform: none;
       letter-spacing: 0;
-      background: transparent;
+      background: var(--surface, #161b22);
       position: sticky;
       top: 0;
+      z-index: 2;
       font-weight: 500;
       border-bottom: 1px solid var(--border);
+      box-shadow: 0 1px 0 var(--border);
     }
     .trades-table tbody tr,
     .position-table tbody tr { transition: background 0.12s ease; }
@@ -698,7 +700,7 @@
     .position-table tr.pos-sub td:first-child { padding-left: 34px; }
 
     /* ===== 持仓明细表格：独立于 trades-table，自适应容器宽度，消除横向滚动条 ===== */
-    .position-table-wrap { overflow-x: hidden; }
+    .position-table-wrap { max-height: 62vh; overflow-x: hidden; overflow-y: auto; }
     .position-table {
       width: 100%;
       border-collapse: collapse;
