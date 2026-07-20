@@ -26,6 +26,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from strategylab.engine.datasource.exceptions import DataSourceError
+
 # ===================================================================
 # A. 基础导入测试
 # ===================================================================
@@ -267,14 +269,13 @@ class TestEastmoneyAdapter:
 
     @patch("urllib.request.urlopen")
     def test_fetch_kline_no_data_field(self, mock_urlopen: MagicMock) -> None:
-        """东财返回无 data 字段的响应。"""
+        """东财返回无 data 字段（顶层非预期结构）的响应 → 抛 DataSourceError。"""
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"code": 0}).encode("utf-8")
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
-        df = self.ds.fetch_kline("600216.SH", "101", "20230101", "20230102")
-        assert isinstance(df, pd.DataFrame)
-        assert len(df) == 0
+        with pytest.raises(DataSourceError):
+            self.ds.fetch_kline("600216.SH", "101", "20230101", "20230102")
 
     # ---- 限流测试 ----
 

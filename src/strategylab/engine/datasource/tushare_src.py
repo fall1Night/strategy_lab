@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures as _cf
 from typing import Any
 
 import pandas as pd
@@ -96,12 +97,26 @@ class TushareDataSource(DataSource):
         end_clean = end.replace("-", "")[:8]
 
         try:
-            df_raw = pro.daily(
-                ts_code=ts_code,
-                start_date=start_clean,
-                end_date=end_clean,
-                adj=adj,
-            )
+            # tushare 内部网络请求无统一超时入口，用单线程包裹并设上限，
+            # 避免单个标的取数卡死（无限等待）拖垮整个批次。
+            _ex = _cf.ThreadPoolExecutor(max_workers=1)
+            try:
+                _fut = _ex.submit(
+                    pro.daily,
+                    ts_code=ts_code,
+                    start_date=start_clean,
+                    end_date=end_clean,
+                    adj=adj,
+                )
+                df_raw = _fut.result(timeout=self.config.network_timeout)
+            except _cf.TimeoutError as _te:
+                raise DataSourceError(
+                    self.name,
+                    f"tushare 取数超时(>{self.config.network_timeout}s): {_te}",
+                ) from _te
+            finally:
+                # 非阻塞关闭：即便底层线程仍卡在请求上，也不阻塞当前批次任务。
+                _ex.shutdown(wait=False)
         except Exception as e:
             raise DataSourceError(self.name, f"tushare 取数失败: {type(e).__name__}: {e}") from e
 

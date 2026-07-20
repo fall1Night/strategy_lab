@@ -12,7 +12,7 @@
 name = "周线MACD + 日线KDJ 双入口做T"
 type = "kdj_macd_dual_entry"
 market = "china_a"
-description = "周线MACD柱<0进入监控区, 动能筑底转强(路径A:日线J<50 / 路径B:周J<30且转涨)尾盘建底仓; 持仓期用日线J线做T增厚; 日线MACD水上死叉清仓。"
+description = "周线MACD柱<0进入监控区, 动能筑底转强(日线J<50)尾盘建底仓; 持仓期用日线J线做T增厚; 日线MACD水上死叉清仓。"
 
 [params]
 initial_cash = 200000          # 初始资金(元)
@@ -40,13 +40,6 @@ armed_hist_below_zero = true   # 周线MACD柱(hist)<0 才进入监控区
 armed_hist_rising = true       # 某一周 hist 较上周上涨(动能筑底转强)才 armed
 disarm_hist_above_zero = true  # hist 回到 0 轴上方自动解除监控
 j_buy = 50                     # 当日线 J < 此值 尾盘买入底仓
-
-[params.entry.path_b]
-enabled = true
-hist_below_zero = true         # 周线 hist < 0
-j_below = 30                   # 周线 J < 30
-j_rising = true                # 本周周J 较上周 J 上涨
-skip_daily_j = true            # 不卡日线J(直接尾盘买入底仓)
 
 # ---- 做T: 仅看日线 KDJ 的 J 线 ----
 [params.t_trade]

@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 
 import pandas as pd
 
@@ -48,15 +49,29 @@ _DEFAULT_REFERERS: list[str] = [
     "https://finance.eastmoney.com/",
     "https://data.eastmoney.com/",
     "https://guba.eastmoney.com/",
-    "https://www.baidu.com/s?wd=股票行情",
 ]
+
+
+def _ascii_safe(value: str) -> str:
+    """保证 HTTP 头值能用 latin-1 编码：非 latin-1 字符做百分号编码。
+
+    HTTP 请求头须以 latin-1 编码，含非 ASCII 字符（如中文）的值会让
+    ``urllib.request`` 抛 ``UnicodeEncodeError``。这里对无法 latin-1 编码的
+    部分做百分号编码（浏览器等效行为），使任意头值都不会让发送方崩溃。
+    """
+    try:
+        value.encode("latin-1")
+        return value
+    except UnicodeEncodeError:
+        # 对 URL 型头，把非 ASCII 部分百分号编码（保留 URL 结构字符）
+        return quote(value, safe=":/?=&%#")
 
 
 def random_headers() -> dict[str, str]:
     """随机生成请求头，每次调用不同 UA/Referer，降低指纹识别风险。"""
     return {
-        "User-Agent": random.choice(_DEFAULT_USER_AGENTS),
-        "Referer": random.choice(_DEFAULT_REFERERS),
+        "User-Agent": _ascii_safe(random.choice(_DEFAULT_USER_AGENTS)),
+        "Referer": _ascii_safe(random.choice(_DEFAULT_REFERERS)),
     }
 
 
@@ -158,6 +173,10 @@ def _is_retryable_network_error(exc: BaseException) -> bool:
     'Remote end closed connection without response' 是 http.client.RemoteDisconnected，
     在并发拉取行情时上游偶发关闭连接所致，属瞬时错误，重试通常可恢复。
     """
+    from .exceptions import RetryableDataSourceError
+
+    if isinstance(exc, RetryableDataSourceError):
+        return True
     if isinstance(
         exc,
         (ConnectionError, TimeoutError, socket.timeout, http.client.RemoteDisconnected),

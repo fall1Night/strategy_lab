@@ -703,6 +703,9 @@ function beginBatch(d){
   document.getElementById('batch-hit').textContent=d.hit_count;
   document.getElementById('prog-done-msg').style.display='none';
   document.getElementById('reinit-note').style.display='none';
+  // B. 新批次启动：恢复「取消批次」按钮可见且可用（修复：上一轮终态隐藏后再次提交不再隐藏）
+  var cbtn=document.getElementById('cancel-btn');
+  if(cbtn){ cbtn.style.display=''; cbtn.disabled=false; cbtn.textContent='取消批次'; }
   poll(); pollTimer=setInterval(poll,2000);
 }
 function poll(){
@@ -729,6 +732,12 @@ function poll(){
         dm.innerHTML='✅ 批次已完成。前往 <a href="/analysis">分析查询页</a> 查看收益排名。';
       }
       dm.style.display='block';
+      // A. 终态隐藏「取消批次」按钮（核心修复：之前按钮一直显示，用户无法判断是否完成）
+      var cbtn=document.getElementById('cancel-btn');
+      if(cbtn){ cbtn.style.display='none'; }
+      // C. 完成态视觉强化：进度条置为绿色，明确传达「已完成」
+      var bar=document.getElementById('prog-bar');
+      if(bar){ bar.style.background='#2e7d32'; }
       if(p.status==='interrupted'){ document.getElementById('reinit-note').style.display='block'; }
       loadBatches();
     }

@@ -18,6 +18,14 @@ class DataSourceError(Exception):
         super().__init__(f"[{source}] {message}" if message else f"[{source}] 数据源错误")
 
 
+class RetryableDataSourceError(DataSourceError):
+    """可重试的数据源错误（如东财 rc=100 限流、瞬时接口拒绝）。
+
+    基类 ``fetch_kline`` 的重试循环通过 ``_is_retryable_network_error`` 识别本类，
+    触发指数退避重试，而非一次性致命失败。
+    """
+
+
 class MissingDependencyError(DataSourceError):
     """可选依赖未安装时抛出，携带安装提示。
 

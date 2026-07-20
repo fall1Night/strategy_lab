@@ -1,0 +1,53 @@
+2026-07-20 22:43:27,478 [INFO] strategylab.web: 量化回测服务已启动 → http://localhost:8000 (Ctrl+C 停止)
+2026-07-20 22:46:34,097 [INFO] strategylab.web: [run] symbols=['600839.SH'] start=2021-07-20 end=2026-07-20 strategy=kdj_macd_dual_entry
+2026-07-20 22:46:34,102 [ERROR] strategylab.web: [error] Traceback (most recent call last):
+  File "E:\量化交易\strategy_lab\src\strategylab\web.py", line 1467, in do_POST
+    html = self._handle_run()
+  File "E:\量化交易\strategy_lab\src\strategylab\web.py", line 1375, in _handle_run
+    html = run_backtest(symbols, start, end, strategy, names=names)
+  File "E:\量化交易\strategy_lab\src\strategylab\web.py", line 96, in run_backtest
+    r = run_symbol(cfg, sym, stock_name, start, end, out_dir, batch_id=batch_id)
+  File "E:\量化交易\strategy_lab\src\strategylab\engine\backtest.py", line 49, in run_symbol
+    daily_csv, weekly_csv = data_feed.ensure_data(
+                            ~~~~~~~~~~~~~~~~~~~~~^
+        sym_cfg, out_dir,
+        ^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+        required_end=fetch_end.strftime("%Y%m%d"),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "E:\量化交易\strategy_lab\src\strategylab\engine\data_feed.py", line 58, in ensure_data
+    return _ds_ensure_data(
+        symbol_cfg, out_dir,
+    ...<2 lines>...
+        mode=mode, required_beg=required_beg, required_end=required_end,
+    )
+  File "E:\量化交易\strategy_lab\src\strategylab\engine\datasource\provider.py", line 407, in ensure_data
+    return get_provider().ensure_data(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        symbol_cfg, out_dir, daily_beg, daily_end, daily_lmt,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        weekly_beg, weekly_end, weekly_lmt,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        mode, required_beg, required_end,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "E:\量化交易\strategy_lab\src\strategylab\engine\datasource\provider.py", line 142, in ensure_data
+    return self._ensure_verify(
+           ~~~~~~~~~~~~~~~~~~~^
+        symbol, prefix, effective_source, out_dir,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+        required_beg, required_end,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "E:\量化交易\strategy_lab\src\strategylab\engine\datasource\provider.py", line 304, in _ensure_verify
+    raise DataMissingError(
+    ...<3 lines>...
+    )
+strategylab.engine.datasource.exceptions.DataMissingError: [600839.SH] 行情缺失/不足（日线覆盖=False，周线覆盖=False），请先点『更新数据源』刷新后再回测
+
+2026-07-20 22:47:47,705 [INFO] strategylab.web: [run] symbols=['600839.SH'] start=2023-07-20 end=2026-07-20 strategy=kdj_macd_dual_entry

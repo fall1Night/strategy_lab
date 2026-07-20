@@ -23,6 +23,8 @@ class DataSourceConfig:
         tushare_token: tushare 凭证（可选）。
         min_fetch_gap: 单源最小请求间隔（秒，默认 0.3）。
         cb_enabled: 熔断总开关（默认 True）。
+        network_timeout: 取数网络超时（秒，默认 15.0）。用于包裹 akshare/tushare
+            等第三方库的内部分网络调用，避免单个标的取数卡死拖垮整个批次。
     """
 
     default_source: str = "eastmoney"
@@ -32,6 +34,7 @@ class DataSourceConfig:
     tushare_token: str | None = None
     min_fetch_gap: float = 2.0
     cb_enabled: bool = True
+    network_timeout: float = 15.0
 
     @staticmethod
     def from_env() -> "DataSourceConfig":
@@ -51,6 +54,8 @@ class DataSourceConfig:
           （``"on"`` → True / ``"off"`` → False）
         - ``STRATEGALAB_DATASOURCE_GAP`` → ``min_fetch_gap``
           （秒，默认 ``1.0``；数值越小请求越密、越易触发限流）
+        - ``STRATEGALAB_DATASOURCE_TIMEOUT`` → ``network_timeout``
+          （取数网络超时秒数，默认 ``15.0``；用于包裹第三方库调用防止单标的卡死）
         """
         default_source = os.environ.get("STRATEGALAB_DATA_SOURCE", "eastmoney").strip().lower()
 
@@ -77,6 +82,10 @@ class DataSourceConfig:
             gap = float(os.environ.get("STRATEGALAB_DATASOURCE_GAP", "2.0"))
         except (ValueError, TypeError):
             gap = 1.0
+        try:
+            net_timeout = float(os.environ.get("STRATEGALAB_DATASOURCE_TIMEOUT", "15.0"))
+        except (ValueError, TypeError):
+            net_timeout = 15.0
 
         return DataSourceConfig(
             default_source=default_source,
@@ -86,4 +95,5 @@ class DataSourceConfig:
             tushare_token=tushare_token,
             min_fetch_gap=gap,
             cb_enabled=cb_enabled,
+            network_timeout=net_timeout,
         )

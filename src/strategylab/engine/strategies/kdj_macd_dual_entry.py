@@ -2,10 +2,9 @@
 """周线 MACD + 日线 KDJ 双入口建仓 + 日线 J 线做 T + 日线 MACD 水上死叉清仓。
 
 策略逻辑（参数全部来自 .toml，可按需改）：
-  建仓（两条平行入口，同一时间仅持有一笔底仓）：
+  建仓（单入口路径A，同一时间仅持有一笔底仓）：
     路径A: 周线 MACD 柱(hist)<0 进入监控区；当某一周 hist 较上周上涨（动能筑底转强）→
-           判定日线 J < j_buy 买入底仓；hist 回到 0 轴上方自动解除监控。
-    路径B: 周线 hist<0 且 周 J<j_below 且 本周周 J 较上周上涨 → 直接尾盘买入底仓（不卡日线 J）。
+          判定日线 J < j_buy 买入底仓；hist 回到 0 轴上方自动解除监控。
   做T（完全基于日线 KDJ 的 J 线）：
     - 加仓：J 较近 5 日高点回落 ≥ drop_from_high 且仍在下降（J<前日J）→ 买 t_buy_amount。
     - 停止加仓：J 反弹（J≥前日J）→ 不买。
@@ -31,7 +30,6 @@ class KdjMacdDualEntry(BaseStrategy):
         """周线MACD+日线KDJ 双入口做T 策略说明（功能不变，键访问全部兜底）。"""
         entry = params.get("entry") or {}
         pa = entry.get("path_a") or {}
-        pb = entry.get("path_b") or {}
         tt = params.get("t_trade") or {}
         comm = (params.get("commission") or 0) * 10000
         tax = (params.get("stamp_tax") or 0) * 10000
@@ -42,8 +40,6 @@ class KdjMacdDualEntry(BaseStrategy):
             f"- 建仓（两条平行入口，同一时间仅持有一笔底仓）：\n"
             f"  路径A：周线MACD柱(hist)<0进入监控区；当某一周hist较上周上涨（动能筑底转强）开始判定；"
             f"日线KDJ的J线<{pa.get('j_buy', 50)}当日收盘买入底仓；hist回到0轴上方自动解除监控。\n"
-            f"  路径B：周线hist<0 且 周J线<{pb.get('j_below', 30)} 且 本周周J线较上周上涨 "
-            f"→ 当日收盘直接买入底仓（不卡日线J）。\n"
             f"- 做T（仅看日线J线）：J较近5日高点回落≥{tt.get('drop_from_high', 30)}且仍在下降（J<前日J）当日收盘买{t_amt_wan}万；"
             f"J反弹（J≥前日J）停止加仓；J>{tt.get('j_sell_threshold', 80)}当日收盘卖光全部加仓部分，底仓不动。\n"
             f"- 清仓：日线MACD水上死叉（DIF>0且DEA>0且DIF下穿DEA）当日收盘清仓全部。\n"
@@ -115,7 +111,6 @@ class KdjMacdDualEntry(BaseStrategy):
         kdj_p = p["kdj"]
         entry = p["entry"]
         pa = entry["path_a"]
-        pb = entry["path_b"]
         tt = p["t_trade"]
         exit_cfg = p["exit"]
         single_base = bool(p.get("single_base_position", {}).get("enabled", True))
@@ -140,14 +135,9 @@ class KdjMacdDualEntry(BaseStrategy):
         ) if (pa.get("armed_hist_below_zero") and pa.get("armed_hist_rising")) else pd.Series(False, index=weekly.index)
         weekly["wk_J"] = compute_kdj(weekly, kdj_p["n"], kdj_p["m1"], kdj_p["m2"])
         weekly["wk_J_prev"] = weekly["wk_J"].shift(1)
-        weekly["wk_entry_b"] = (
-            (weekly["wk_hist"] < 0)
-            & (weekly["wk_J"] < pb.get("j_below", 30))
-            & (weekly["wk_J"] > weekly["wk_J_prev"])
-        )
 
         # ---- 周线 → 日线对齐（backward，无未来数据）----
-        wk = (weekly[["date", "wk_hist", "wk_hist_prev", "wk_trigger", "wk_J", "wk_J_prev", "wk_entry_b"]]
+        wk = (weekly[["date", "wk_hist", "wk_hist_prev", "wk_trigger", "wk_J", "wk_J_prev"]]
               .rename(columns={"date": "wk_date"}).sort_values("wk_date"))
         daily = daily.sort_values("date")
         daily = pd.merge_asof(daily, wk, left_on="date", right_on="wk_date", direction="backward")
@@ -161,7 +151,6 @@ class KdjMacdDualEntry(BaseStrategy):
         t_shares = 0
         monitoring_armed = False
         last_trigger_week_date = None
-        last_entryb_week_date = None
         trade_history: list = []
         equity_curve: list = []
         peak_total_value: float = 0.0  # 持仓期间总资产峰值（用于 6% 回撤清仓）
@@ -259,23 +248,7 @@ class KdjMacdDualEntry(BaseStrategy):
                         peak_total_value = cash + size * close  # 建仓时设初始峰值
                         monitoring_armed = False
                         bought_a = True
-                # 路径B
-                wk_entry_b = bool(row["wk_entry_b"]) if pd.notna(row.get("wk_entry_b")) else False
-                if (pb.get("enabled") and (not bought_a) and wk_entry_b
-                        and pd.notna(wk_date) and wk_date != last_entryb_week_date):
-                    last_entryb_week_date = wk_date
-                    if cash >= base_buy:
-                        size = int(base_buy / close)
-                        size = (size // self.lot_size) * self.lot_size
-                        if size > 0:
-                            cost_b = self._fee_cost(size, close)
-                            cash -= cost_b
-                            base_shares = size
-                            pid_counter += 1
-                            base_trade = {"entry_date": date_str, "entry_price": close, "size": size,
-                                          "entry_bar": i, "position_id": pid_counter}
-                            peak_total_value = cash + size * close  # 建仓时设初始峰值
-            equity_curve.append({"date": date_str, "value": round(cash + (base_shares + t_shares) * close, 2)})
+        equity_curve.append({"date": date_str, "value": round(cash + (base_shares + t_shares) * close, 2)})
 
         # 期末强制平仓
         last_row = daily.iloc[-1]

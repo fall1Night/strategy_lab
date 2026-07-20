@@ -14,6 +14,7 @@ from typing import Any
 import pandas as pd
 
 from . import data_feed
+from .datasource.exceptions import DataMissingError
 from .strategies import get_strategy_class
 
 
@@ -44,16 +45,28 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
     fetch_end = max(end_ts, today)
     daily_beg = (start_ts - pd.DateOffset(years=1)).strftime("%Y%m%d")
     weekly_beg = (start_ts - pd.DateOffset(years=1, months=6)).strftime("%Y%m%d")
-    # FR-40：回测仅校验缓存覆盖（verify），缺数据抛 DataMissingError 由上层标记 failed，
-    # 绝不在此重新取数；如行情不足，提示用户先点「更新数据源」。
-    daily_csv, weekly_csv = data_feed.ensure_data(
-        sym_cfg, out_dir,
-        daily_beg=daily_beg, daily_end=fetch_end.strftime("%Y%m%d"),
-        weekly_beg=weekly_beg, weekly_end=fetch_end.strftime("%Y%m%d"),
-        mode="verify",
-        required_beg=daily_beg,
-        required_end=fetch_end.strftime("%Y%m%d"),
-    )
+    # FR-40 修复：回测先仅校验缓存覆盖（verify）；若行情不足（warmup 历史缺失或
+    # 末日早于今天）则自动以 update 双向补（往前补历史 + 往后补到今天）后继续回测，
+    # 而非仅提示手动更新。若 update 仍失败（如网络彻底不可用）则保持 DataMissingError
+    # 上浮，由上层标记 failed —— 不改变既有"缺数即失败"的兜底语义。
+    fetch_end_str = fetch_end.strftime("%Y%m%d")
+    try:
+        daily_csv, weekly_csv = data_feed.ensure_data(
+            sym_cfg, out_dir,
+            daily_beg=daily_beg, daily_end=fetch_end_str,
+            weekly_beg=weekly_beg, weekly_end=fetch_end_str,
+            mode="verify",
+            required_beg=daily_beg,
+            required_end=fetch_end_str,
+        )
+    except DataMissingError:
+        # 行情不足：自动补足（从 daily_beg/weekly_beg 起点双向补到今天）后再回测
+        daily_csv, weekly_csv = data_feed.ensure_data(
+            sym_cfg, out_dir,
+            daily_beg=daily_beg, daily_end=fetch_end_str,
+            weekly_beg=weekly_beg, weekly_end=fetch_end_str,
+            mode="update",
+        )
     daily = data_feed.load_bars(daily_csv)
     weekly = data_feed.load_bars(weekly_csv)
 

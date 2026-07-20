@@ -145,22 +145,47 @@ class KlineCache:
     ) -> str | None:
         """返回本次应取数的起点 ``YYYYMMDD``；无需取数返回 ``None``。
 
+        支持**双向补**：
+
+        - 往前补：所需起点 ``default_beg`` 比缓存首日更早（``first > default_beg``）
+          时，从 ``default_beg`` 全量拉取，``merge`` 去重会保留已缓存的中间段。
+        - 往后补：缓存末日早于今天（``last < today``）时，从 ``last + 1`` 追加。
+
         Args:
-            meta: 缓存 meta（含实际最后交易日 ``last``）；``None`` 表示无缓存。
+            meta: 缓存 meta（含 ``beg``/``first`` 与 ``last``/``end``）；``None``
+                表示无缓存。
             today_yyyymmdd: 今天 ``YYYYMMDD``。
-            default_beg: 无缓存时的首拉起点（genesis）。
+            default_beg: 无缓存时的首拉起点（genesis）；往前补时即回测所需起点。
 
         Returns:
-            取数起点（``last + 1`` 个日历日）；若 ``last >= today`` 则 ``None``
-            （已最新，幂等跳过）。
+            取数起点：
+              - 无缓存 / 缺边界 → ``default_beg``（全量首拉）；
+              - 需往前补 → ``default_beg``（从所需起点拉全量）；
+              - 仅往后补 → ``last + 1``（原行为）；
+              - 都不缺 → ``None``（已覆盖所需区间 + 已最新，幂等跳过）。
         """
-        if not meta or not meta.get("last"):
-            return default_beg  # 无缓存 → 从 genesis 全量首拉
-        last = str(meta["last"])  # 实际最后交易日 YYYYMMDD
-        if last >= today_yyyymmdd:
-            return None  # 已最新（含周末）→ 幂等跳过
+        # 读取缓存区间边界（meta 同时有 beg/end 与 first/last，取其一即可）
+        first = str(meta.get("beg") or meta.get("first") or "") if meta else ""
+        last = str(meta.get("last") or meta.get("end") or "") if meta else ""
+
+        # 无缓存或缺边界 → 从 genesis 全量首拉（首次首拉行为不变）
+        if not meta or not (last or first):
+            return default_beg
+
+        # 双向补判定（YYYYMMDD 字典序即时间序）
+        need_front = bool(first) and first > default_beg
+        need_back = bool(last) and last < today_yyyymmdd
+
+        if not need_front and not need_back:
+            return None  # 已覆盖所需区间 + 已最新 → 幂等跳过
+
+        if need_front:
+            # 往前补：从所需起点拉全量，merge 去重保留已缓存中间段
+            return default_beg
+
+        # 仅往后补：从末日 + 1 起追加（原行为）
         nxt = (self._parse_yyyymmdd(last) + timedelta(days=1)).strftime("%Y%m%d")
-        return nxt  # 从末日+1 起追加
+        return nxt
 
     def merge(
         self,

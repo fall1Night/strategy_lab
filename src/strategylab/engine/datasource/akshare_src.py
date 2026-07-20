@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures as _cf
 from typing import Any
 
 import pandas as pd
@@ -78,12 +79,26 @@ class AkshareDataSource(DataSource):
         adjust: str = params.get("adjust", "qfq")
 
         try:
-            df_raw = ak.stock_zh_a_daily(
-                symbol=sina_symbol,
-                start_date=start,
-                end_date=end,
-                adjust=adjust,
-            )
+            # akshare 内部网络请求无统一超时入口，用单线程包裹并设上限，
+            # 避免单个标的取数卡死（无限等待）拖垮整个批次。
+            _ex = _cf.ThreadPoolExecutor(max_workers=1)
+            try:
+                _fut = _ex.submit(
+                    ak.stock_zh_a_daily,
+                    symbol=sina_symbol,
+                    start_date=start,
+                    end_date=end,
+                    adjust=adjust,
+                )
+                df_raw = _fut.result(timeout=self.config.network_timeout)
+            except _cf.TimeoutError as _te:
+                raise DataSourceError(
+                    self.name,
+                    f"akshare 新浪源取数超时(>{self.config.network_timeout}s): {_te}",
+                ) from _te
+            finally:
+                # 非阻塞关闭：即便底层线程仍卡在请求上，也不阻塞当前批次任务。
+                _ex.shutdown(wait=False)
         except Exception as e:
             raise DataSourceError(self.name, f"akshare 新浪源取数失败: {type(e).__name__}: {e}") from e
 

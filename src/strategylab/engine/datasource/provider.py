@@ -69,6 +69,21 @@ def _get_switch_log() -> SwitchLog:
     return _switch_log
 
 
+def _cache_needs_front(
+    meta: "dict[str, Any] | None", default_beg: str
+) -> bool:
+    """缓存首日是否晚于所需起点（需往前补历史）。
+
+    用于「旧格式兼容跳过」分支：当缓存首日比 ``default_beg`` 更晚时，
+    即便末日已最新也仍需往前补，此时不能把 ``need_daily/need_weekly``
+    误判为 ``False``（否则会漏补前面历史，死循环）。
+    """
+    if not meta:
+        return False
+    first = str(meta.get("beg") or meta.get("first") or "")
+    return bool(first) and first > default_beg
+
+
 class KlineProvider:
     """K 线取数编排器。
 
@@ -162,15 +177,30 @@ class KlineProvider:
         need_daily = daily_beg_calc is not None
         need_weekly = weekly_beg_calc is not None
 
+        # 往前补判定：缓存首日晚于所需起点时，旧格式"已最新"跳过逻辑不可用，
+        # 必须保证 need_daily/need_weekly 保持 True，否则会漏补前面历史（死循环）。
+        daily_need_front = _cache_needs_front(daily_meta, daily_beg)
+        weekly_need_front = _cache_needs_front(weekly_meta, weekly_beg)
+
         # 旧格式兼容：新格式无 meta 但旧格式已是最新 → 视为最新、用旧路径跳过
-        if need_daily and effective_source == "eastmoney" and is_legacy_d:
+        if (
+            need_daily
+            and effective_source == "eastmoney"
+            and is_legacy_d
+            and not daily_need_front
+        ):
             old_meta = self._cache._read_meta(
                 self._cache._legacy_meta_path(out_dir, prefix, "daily")
             )
             if old_meta and old_meta.get("last") and old_meta["last"] >= today:
                 need_daily = False
                 daily_csv = self._cache._legacy_csv_path(out_dir, prefix, "daily")
-        if need_weekly and effective_source == "eastmoney" and is_legacy_w:
+        if (
+            need_weekly
+            and effective_source == "eastmoney"
+            and is_legacy_w
+            and not weekly_need_front
+        ):
             old_meta = self._cache._read_meta(
                 self._cache._legacy_meta_path(out_dir, prefix, "weekly")
             )
@@ -195,14 +225,26 @@ class KlineProvider:
             weekly_beg_calc = self._cache._incremental_window(weekly_meta, today, weekly_beg)
             need_daily = daily_beg_calc is not None
             need_weekly = weekly_beg_calc is not None
-            if need_daily and effective_source == "eastmoney" and is_legacy_d:
+            daily_need_front = _cache_needs_front(daily_meta, daily_beg)
+            weekly_need_front = _cache_needs_front(weekly_meta, weekly_beg)
+            if (
+                need_daily
+                and effective_source == "eastmoney"
+                and is_legacy_d
+                and not daily_need_front
+            ):
                 old_meta = self._cache._read_meta(
                     self._cache._legacy_meta_path(out_dir, prefix, "daily")
                 )
                 if old_meta and old_meta.get("last") and old_meta["last"] >= today:
                     need_daily = False
                     daily_csv = self._cache._legacy_csv_path(out_dir, prefix, "daily")
-            if need_weekly and effective_source == "eastmoney" and is_legacy_w:
+            if (
+                need_weekly
+                and effective_source == "eastmoney"
+                and is_legacy_w
+                and not weekly_need_front
+            ):
                 old_meta = self._cache._read_meta(
                     self._cache._legacy_meta_path(out_dir, prefix, "weekly")
                 )
