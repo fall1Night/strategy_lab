@@ -29,6 +29,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -151,6 +152,9 @@ class Batch(Base):
     params_hash: Mapped[str] = mapped_column(String(40), index=True)
     scope_type: Mapped[str] = mapped_column(String(16))  # sector / pool / all_market
     scope_value: Mapped[str] = mapped_column(String(256))  # 板块 codes / 池 symbols / "ALL"
+    batch_type: Mapped[str] = mapped_column(
+        String(16), default="backtest", server_default=text("'backtest'")
+    )  # FR-37：'backtest' / 'data' 区分回测批次与数据源更新批次
     total_count: Mapped[int] = mapped_column(Integer, default=0)
     done_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)

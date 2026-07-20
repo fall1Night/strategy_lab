@@ -1,0 +1,69 @@
+%% 7.1 更新数据源全流程（FR-38/39，data-only 批次）
+sequenceDiagram
+    participant U as 用户(/production)
+    participant W as WebHandler
+    participant BR as BatchRunner
+    participant P as KlineProvider
+    participant C as KlineCache
+    participant DS as DataSource(akshare新浪)
+
+    U->>W: POST /api/data/update (scope=sector/pool/all_market)
+    W->>W: 解析范围 → items[]
+    W->>BR: submit_data_batch(items, out_dir)
+    BR->>BR: create_batch(batch_type='data')
+    BR->>BR: ThreadPoolExecutor 提交 _run_one_data(每只)
+    loop 每只标的
+        BR->>P: ensure_data(sym, mode='update')
+        P->>C: _read_any_meta(daily/weekly)
+        C-->>P: meta(含 last)
+        P->>P: _incremental_window → daily_beg=last+1
+        alt 需要取数(last < today)
+            P->>DS: fetch_kline([last+1, today])
+            DS-->>P: new_df
+            P->>C: merge(spec, source, period, new_df)
+            C->>C: 读旧CSV + 按date去重 + 排序
+            C->>C: os.replace 原子写回 + 更新 meta(last)
+        else 已最新(last>=today)
+            P-->>BR: 跳过(幂等)
+        end
+        BR->>BR: update_batch_item(done/failed，error_msg记"已是最新/新增N天")
+        BR->>BR: inc_batch_count
+    end
+    BR-->>W: {batch_id, total_count, hit_count(=已最新数)}
+    W-->>U: 返回 batch_id → 2s 轮询 /api/batch/<id>/progress
+    U->>W: GET /api/batch/<id>/progress
+    W->>BR: get_progress(batch_id)
+    BR-->>W: {total, done, failed, skipped, status}
+    W-->>U: 进度条 + 板块总览(复用 batch_sector_status)
+
+%% 7.2 回测全流程（FR-40，verify-only，不取数）
+sequenceDiagram
+    participant U as 用户(/production)
+    participant W as WebHandler
+    participant BR as BatchRunner
+    participant P as KlineProvider
+    participant R as Repository
+    participant BE as backtest.run_symbol
+
+    U->>W: POST /api/batch (scope, strategy)  [回测按钮]
+    W->>W: 解析范围 → items[]
+    W->>BR: submit_batch(items)
+    BR->>R: find_existing_runs(...) 命中预查
+    R-->>BR: {symbol: run_id} 命中映射
+    BR->>BR: create_batch(batch_type='backtest') + batch_items(skipped/pending)
+    BR->>BR: ThreadPoolExecutor 提交 _run_one(pending)
+    loop 每只未命中标的
+        BR->>P: ensure_data(sym, mode='verify', required=[daily_beg,daily_end])
+        alt 缓存覆盖所需区间
+            P-->>BR: OK(不取数，返回已缓存CSV路径)
+            BR->>BE: run_symbol(...) → 落库 backtest_runs
+            BE-->>BR: run_id
+            BR->>BR: update_batch_item(done, run_id)
+        else 缓存缺失/不足
+            P-->>BR: 抛 DataMissingError
+            BR->>BR: update_batch_item(failed, "行情缺失，请先点『更新数据源』")
+        end
+        BR->>BR: inc_batch_count
+    end
+    BR-->>W: {batch_id, total, hit_count}
+    W-->>U: 返回 batch_id → 轮询进度

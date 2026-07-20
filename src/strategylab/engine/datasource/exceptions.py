@@ -52,3 +52,17 @@ class AllSourcesFailedError(DataSourceError):
         self.errors: list[tuple[str, str]] = errors
         parts = "; ".join(f"{src}: {msg[:80]}" for src, msg in errors)
         super().__init__("ALL", f"所有数据源均失败 symbol={symbol}: {parts}")
+
+
+class DataMissingError(Exception):
+    """verify 模式行情不足时抛出（不取数，提示先更新数据源）。
+
+    FR-40：回测 ``ensure_data(mode='verify')`` 仅校验缓存覆盖所需区间，
+    缺数据即抛此异常，由上层（``_run_one``）标记 ``batch_item`` 为 failed
+    并提示用户先点『更新数据源』刷新行情，绝不静默全量重拉。
+    """
+
+    def __init__(self, symbol: str, message: str = "") -> None:
+        self.symbol: str = symbol
+        self.message: str = message or "行情缺失，请先点『更新数据源』刷新后再回测"
+        super().__init__(f"[{symbol}] {self.message}")

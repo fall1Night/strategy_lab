@@ -44,10 +44,15 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
     fetch_end = max(end_ts, today)
     daily_beg = (start_ts - pd.DateOffset(years=1)).strftime("%Y%m%d")
     weekly_beg = (start_ts - pd.DateOffset(years=1, months=6)).strftime("%Y%m%d")
+    # FR-40：回测仅校验缓存覆盖（verify），缺数据抛 DataMissingError 由上层标记 failed，
+    # 绝不在此重新取数；如行情不足，提示用户先点「更新数据源」。
     daily_csv, weekly_csv = data_feed.ensure_data(
         sym_cfg, out_dir,
         daily_beg=daily_beg, daily_end=fetch_end.strftime("%Y%m%d"),
         weekly_beg=weekly_beg, weekly_end=fetch_end.strftime("%Y%m%d"),
+        mode="verify",
+        required_beg=daily_beg,
+        required_end=fetch_end.strftime("%Y%m%d"),
     )
     daily = data_feed.load_bars(daily_csv)
     weekly = data_feed.load_bars(weekly_csv)

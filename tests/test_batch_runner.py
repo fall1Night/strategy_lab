@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """FR-16/17/25 测试：批量执行器 submit_batch / 命中复用 / cancel / 重启 interrupted。
 
-E. 批量执行（FR-16/17）：
-   - submit_batch（scope_type='pool'，3~5 标的，部分命中复用、其余 pending）；
-     断言 batch_id、total_count、命中项 skipped+is_reused+run_id、pending 项 done+run_id、
-     get_progress 计数合理。
+E. 批量执行（FR-16/17，FR-42 清空重跑）：
+   - submit_batch（scope_type='pool'，4 标的）：FR-42 起不再命中复用，提交即清空同维度
+     历史 run 并全量重跑；断言 hit_count=0、skipped_count=0、done_count=total、
+     全量 done 且 is_reused=False、预存 run 被清空、get_progress 计数合理。
    - cancel_batch：提交后立刻取消，未跑完项转 cancelled（用可暂停执行器消除竞态）。
    - 重启处理：running 批次 → interrupted，其 pending/running item → cancelled。
 """
@@ -56,8 +56,11 @@ def _make_executor(max_workers):
     return ex
 
 
-def _fake_run_symbol(strategy_cfg, symbol, symbol_name, start, end, out_dir, batch_id=None):
-    """不联网：直接落库一条 run 并返回 run_id（模拟回测成功）。"""
+def _fake_run_symbol(strategy_cfg, symbol, symbol_name, start, end, out_dir, batch_id=None, data_source=None):
+    """不联网：直接落库一条 run 并返回 run_id（模拟回测成功）。
+
+    签名兼容 production ``run_symbol``（含 ``data_source`` 关键字参数，FR-42/P0-4）。
+    """
     ph = repository.compute_params_hash(strategy_cfg)
     rid = repository.save_run(
         run_meta(
@@ -66,6 +69,7 @@ def _fake_run_symbol(strategy_cfg, symbol, symbol_name, start, end, out_dir, bat
                 "symbol": symbol,
                 "symbol_name": symbol_name,
                 "strategy_name": strategy_cfg.get("name", ""),
+                "data_source": data_source,
             }
         ),
         equity_curve(),
@@ -104,7 +108,7 @@ def _items_for(batch_id):
 
 
 # ---------------------------------------------------------------------------
-# E1. 正常批量：命中复用 + pending 执行
+# E1. 正常批量：FR-42 清空重跑（不再命中复用，全量重跑）
 # ---------------------------------------------------------------------------
 def test_submit_batch_hit_and_pending(monkeypatch):
     import strategylab.engine.config as config
@@ -119,57 +123,67 @@ def test_submit_batch_hit_and_pending(monkeypatch):
         ph = repository.compute_params_hash(cfg)
         sname = cfg["name"]
 
-        # 预存 2 个命中 run（symA / symB），让它们走复用
+        # 计算同 submit_batch 一致的 effective source（清空间维度以此为准）
+        from strategylab.engine.datasource.config import DataSourceConfig
+        from strategylab.engine.datasource.factory import DataSourceFactory
+
+        ds_cfg = DataSourceConfig.from_env()
+        eff = DataSourceFactory(ds_cfg).get_effective_source("600216.SH")
+
+        # 预存 2 个同维度历史 run（data_source 对齐 effective source），
+        # FR-42 提交时会被 clear_strategy_runs 清空，随后全量重跑。
         hit_a = repository.save_run(
-            run_meta({"params_hash": ph, "strategy_name": sname, "symbol": "600216.SH", "symbol_name": "浙江医药"}),
+            run_meta({"params_hash": ph, "strategy_name": sname, "symbol": "600216.SH",
+                      "symbol_name": "浙江医药", "data_source": eff}),
             equity_curve(), trades(), summary(), [],
         )
         hit_b = repository.save_run(
-            run_meta({"params_hash": ph, "strategy_name": sname, "symbol": "000001.SZ", "symbol_name": "平安银行"}),
+            run_meta({"params_hash": ph, "strategy_name": sname, "symbol": "000001.SZ",
+                      "symbol_name": "平安银行", "data_source": eff}),
             equity_curve(), trades(), summary(), [],
         )
 
         items = [
-            {"symbol": "600216.SH", "symbol_name": "浙江医药", "sector_code": None},      # 命中
-            {"symbol": "000001.SZ", "symbol_name": "平安银行", "sector_code": None},      # 命中
-            {"symbol": "300765.SZ", "symbol_name": "新宙邦", "sector_code": None},        # pending
-            {"symbol": "002001.SZ", "symbol_name": "新和成", "sector_code": None},        # pending
+            {"symbol": "600216.SH", "symbol_name": "浙江医药", "sector_code": None},      # 重跑
+            {"symbol": "000001.SZ", "symbol_name": "平安银行", "sector_code": None},      # 重跑
+            {"symbol": "300765.SZ", "symbol_name": "新宙邦", "sector_code": None},        # 重跑
+            {"symbol": "002001.SZ", "symbol_name": "新和成", "sector_code": None},        # 重跑
         ]
         batch_id, hit_count = batch_runner.submit_batch(
             cfg, sname, ph, "pool", "600216.SH,000001.SZ,300765.SZ,002001.SZ",
             str(__import__("tempfile").mkdtemp()), items,
         )
 
+        # FR-42：不再命中跳过，hit_count 恒为 0（全量重跑）
         assert batch_id and len(batch_id) == 36
-        assert hit_count == 2, f"命中数应为 2，实际 {hit_count}"
+        assert hit_count == 0, f"FR-42 不再命中跳过，hit_count 应为 0，实际 {hit_count}"
 
         b = _wait_batch_done(batch_id, timeout=20)
         assert b["status"] == "done", f"批次应完成，实际 {b['status']}"
         assert b["total_count"] == 4
-        assert b["skipped_count"] == 2
-        assert b["done_count"] == 2
+        assert b["skipped_count"] == 0, "FR-42 不应有 skipped"
+        assert b["done_count"] == 4, f"全量 4 只应全部 done，实际 {b['done_count']}"
 
         # 终态下 get_progress 应正常返回（running+done 的 ETA 窗口崩溃见 test_get_progress_eta_computation）
         prog = batch_runner.get_progress(batch_id)
         assert prog["status"] == "done"
         assert prog["total"] == 4
-        assert prog["skipped"] == 2
-        assert prog["done"] == 2
+        assert prog["skipped"] == 0
+        assert prog["done"] == 4
+
+        # FR-42：清空生效——历史 run 已被删除
+        assert repository.get_run(hit_a) is None, "FR-42 应清空同维度历史 run(hit_a)"
+        assert repository.get_run(hit_b) is None, "FR-42 应清空同维度历史 run(hit_b)"
 
         rows = _items_for(batch_id)
         by_sym = {sym: (status, reused, rid) for sym, status, reused, rid in rows}
-        # 命中项
-        assert by_sym["600216.SH"][0] == "skipped"
-        assert by_sym["600216.SH"][1] is True
-        assert by_sym["600216.SH"][2] == hit_a
-        assert by_sym["000001.SZ"][0] == "skipped"
-        assert by_sym["000001.SZ"][2] == hit_b
-        # pending 项（被线程池执行）
-        assert by_sym["300765.SZ"][0] == "done"
-        assert by_sym["300765.SZ"][1] is False
-        assert by_sym["300765.SZ"][2] is not None and len(by_sym["300765.SZ"][2]) == 36
-        assert by_sym["002001.SZ"][0] == "done"
-        assert by_sym["002001.SZ"][2] is not None
+        # 全量重跑：全部 done、is_reused=False、run_id 为新生成（非预存 hit_a/hit_b）
+        for sym in ("600216.SH", "000001.SZ", "300765.SZ", "002001.SZ"):
+            assert by_sym[sym][0] == "done", f"{sym} 应 done，实际 {by_sym[sym][0]}"
+            assert by_sym[sym][1] is False, f"{sym} is_reused 应为 False"
+            assert by_sym[sym][2] is not None and len(by_sym[sym][2]) == 36
+        assert by_sym["600216.SH"][2] != hit_a
+        assert by_sym["000001.SZ"][2] != hit_b
 
 
 # ---------------------------------------------------------------------------

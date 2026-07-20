@@ -66,7 +66,9 @@ def _post(base, path, data: dict):
         return resp.status, resp.read().decode("utf-8")
 
 
-def _fake_run_symbol(strategy_cfg, symbol, symbol_name, start, end, out_dir, batch_id=None):
+def _fake_run_symbol(strategy_cfg, symbol, symbol_name, start, end, out_dir, batch_id=None, data_source=None):
+    # 注意：production ``batch_runner._run_one`` 现会传 ``data_source`` 关键字参数
+    # （P0-4：落库 effective source）；mock 必须接受它，否则全部标的 fail。
     ph = repository.compute_params_hash(strategy_cfg)
     rid = repository.save_run(
         run_meta(
@@ -75,6 +77,7 @@ def _fake_run_symbol(strategy_cfg, symbol, symbol_name, start, end, out_dir, bat
                 "symbol": symbol,
                 "symbol_name": symbol_name,
                 "strategy_name": strategy_cfg.get("name", ""),
+                "data_source": data_source,
             }
         ),
         equity_curve(),
@@ -134,7 +137,9 @@ def test_web_pages_and_apis(monkeypatch):
                     base, "/api/batch",
                     {
                         "scope_type": "pool",
-                        "symbols": "600216.SH,000001.SZ,603365.SH",  # 前两个命中，603365 待跑（不与排名预存重叠）
+                        # FR-42：不再命中跳过，3 只全部重跑（603365 此前未跑过，前两只
+                        # 即便有预存历史 run 也被 submit_batch 前置 clear 掉后重跑）
+                        "symbols": "600216.SH,000001.SZ,603365.SH",
                         "strategy": "kdj_macd_dual_entry",
                     },
                 )
@@ -142,7 +147,8 @@ def test_web_pages_and_apis(monkeypatch):
                 batch = json.loads(body)
                 assert "batch_id" in batch and "total_count" in batch and "hit_count" in batch
                 assert batch["total_count"] == 3
-                assert batch["hit_count"] == 2, f"应有 2 个命中复用，实际 {batch['hit_count']}"
+                # FR-42：回测不再命中跳过，hit_count 恒为 0
+                assert batch["hit_count"] == 0, f"FR-42 不再命中跳过，hit_count 应为 0，实际 {batch['hit_count']}"
                 bid = batch["batch_id"]
 
                 # 等待批次完成（603365.SH 由线程池跑出）
@@ -158,7 +164,10 @@ def test_web_pages_and_apis(monkeypatch):
                         pass
                     time.sleep(0.05)
                 assert pj is not None and pj["status"] == "done", f"批次应完成，实际 {pj}"
-                assert pj["skipped"] == 2 and pj["done"] == 1
+                # FR-42：3 只全部重跑，无命中跳过 → skipped=0, done=3
+                assert pj["skipped"] == 0 and pj["done"] == 3, (
+                    f"FR-42 应全量重跑，预期 skipped=0/done=3，实际 {pj}"
+                )
 
                 # 批次列表
                 _, bl = _get(base, "/api/batch")

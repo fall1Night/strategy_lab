@@ -46,15 +46,20 @@ def ensure_data(
     weekly_beg: str = "20211210",
     weekly_end: str = "20260718",
     weekly_lmt: int = 500,
+    mode: str = "update",
+    required_beg: str | None = None,
+    required_end: str | None = None,
 ) -> tuple[Path, Path]:
     """拉取或复用日线/周线 CSV，返回 (daily_csv, weekly_csv) 路径。
 
-    签名与旧版 100% 一致。内部委托给 ``datasource.provider.ensure_data``。
+    签名与旧版兼容，新增 ``mode`` / ``required_beg`` / ``required_end`` 透传，
+    内部委托给 ``datasource.provider.ensure_data``（FR-39/40）。
     """
     return _ds_ensure_data(
         symbol_cfg, out_dir,
         daily_beg=daily_beg, daily_end=daily_end, daily_lmt=daily_lmt,
         weekly_beg=weekly_beg, weekly_end=weekly_end, weekly_lmt=weekly_lmt,
+        mode=mode, required_beg=required_beg, required_end=required_end,
     )
 
 

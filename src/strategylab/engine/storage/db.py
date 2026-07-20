@@ -116,6 +116,13 @@ def init_db() -> None:
                 s.add(SchemaVersion(version=SCHEMA_VERSION))
             s.commit()
 
+    # v3 → v4：batches 加 batch_type 列（data 批次隔离，幂等；不新增 schema_version 行）
+    if insp.has_table("batches"):
+        batch_cols = [c["name"] for c in insp.get_columns("batches")]
+        if "batch_type" not in batch_cols:
+            from . import migrate
+            migrate.migrate_v3_to_v4(engine)
+
 
 @contextmanager
 def get_session() -> Iterator[Session]:

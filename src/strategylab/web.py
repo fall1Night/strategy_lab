@@ -593,6 +593,7 @@ __STRAT_OPTS__
     <div class="scope-row">
       <label><input type="radio" name="scope" value="sector" checked> 按板块</label>
       <label><input type="radio" name="scope" value="pool"> 自定义池</label>
+      <label><input type="radio" name="scope" value="all_market"> 全市场</label>
     </div>
 
     <div id="scope-sector">
@@ -608,8 +609,8 @@ __SECTOR_OPTS__
       <textarea id="pool-symbols" rows="4" placeholder="600216.SH, 000001.SZ"></textarea>
     </div>
 
-    <button type="button" onclick="submitForm()">提交批量扫描</button>
-    <button type="button" class="ghost" onclick="warmupAll()">🌐 全市场预热（逐板块）</button>
+    <button type="button" onclick="updateData()">💾 更新数据源</button>
+    <button type="button" class="ghost" onclick="runBacktest()">🚀 回测</button>
   </div>
 
   <div class="card" id="batch-info" style="display:none">
@@ -649,7 +650,7 @@ __SECTOR_OPTS__
   </details>
 </div>
 <script>
-var curBatchId=null, pollTimer=null;
+var curBatchId=null, pollTimer=null, curBatchType='backtest';
 function fmtEta(s){ if(s==null) return '—'; s=Math.round(s); var m=Math.floor(s/60); var sec=s%60; return (m>0?m+'分':'')+sec+'秒'; }
 function switchScope(){
   var scope=document.querySelector('input[name=scope]:checked').value;
@@ -658,29 +659,34 @@ function switchScope(){
 }
 Array.prototype.forEach.call(document.querySelectorAll('input[name=scope]'),function(r){ r.addEventListener('change',switchScope); });
 
-function submitForm(){
+function buildScopeForm(){
   var fd=new FormData();
   fd.append('strategy', document.getElementById('strategy').value);
   var scope=document.querySelector('input[name=scope]:checked').value;
   if(scope==='sector'){
     var sel=document.getElementById('sector-multi');
     var codes=Array.prototype.map.call(sel.selectedOptions,function(o){return o.value;});
-    if(!codes.length){ alert('请至少选择一个板块'); return; }
+    if(!codes.length){ alert('请至少选择一个板块'); return null; }
     fd.append('scope_type','sector'); fd.append('scope_value', codes.join(','));
   } else if(scope==='pool'){
     var sym=document.getElementById('pool-symbols').value.trim();
-    if(!sym){ alert('请填写自定义池标的'); return; }
+    if(!sym){ alert('请填写自定义池标的'); return null; }
     fd.append('scope_type','pool'); fd.append('symbols', sym);
-  } else { return; }
-  startBatch(fd);
+  } else if(scope==='all_market'){
+    fd.append('scope_type','all_market'); fd.append('scope_value','ALL');
+  } else { return null; }
+  return fd;
 }
-function warmupAll(){
-  var fd=new FormData();
-  fd.append('strategy', document.getElementById('strategy').value);
-  fetch('/api/batch/warmup-all',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
+function updateData(){
+  var fd=buildScopeForm(); if(!fd) return;
+  fetch('/api/data/update',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
     if(d.error){ alert(d.error); return; }
     beginBatch(d);
-  }).catch(function(e){ alert('预热失败: '+e); });
+  }).catch(function(e){ alert('更新失败: '+e); });
+}
+function runBacktest(){
+  var fd=buildScopeForm(); if(!fd) return;
+  startBatch(fd);
 }
 function startBatch(fd){
   fetch('/api/batch',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
@@ -690,6 +696,7 @@ function startBatch(fd){
 }
 function beginBatch(d){
   curBatchId=d.batch_id;
+  curBatchType=d.batch_type||'backtest';
   document.getElementById('batch-info').style.display='block';
   document.getElementById('batch-id').textContent=d.batch_id;
   document.getElementById('batch-total').textContent=d.total_count;
@@ -715,7 +722,13 @@ function poll(){
     document.getElementById('prog-eta').textContent=fmtEta(p.eta_seconds);
     if(['done','cancelled','interrupted'].indexOf(p.status)>=0){
       clearInterval(pollTimer); pollTimer=null;
-      document.getElementById('prog-done-msg').style.display='block';
+      var dm=document.getElementById('prog-done-msg');
+      if(curBatchType==='data'){
+        dm.innerHTML='✅ 行情已更新，可前往 <a href="/analysis">分析查询页</a> 或重新『回测』。';
+      } else {
+        dm.innerHTML='✅ 批次已完成。前往 <a href="/analysis">分析查询页</a> 查看收益排名。';
+      }
+      dm.style.display='block';
       if(p.status==='interrupted'){ document.getElementById('reinit-note').style.display='block'; }
       loadBatches();
     }
@@ -900,7 +913,7 @@ function sortBy(col){
   loadRank(1);
 }
 function headerHtml(){
-  var cols=[['symbol_name','股票名称',true],['total_return_pct','总收益率',true],['max_drawdown_pct','最大回撤',true],['sharpe','夏普',true],['win_rate_pct','胜率',true],['','数据时效',false]];
+  var cols=[['symbol_name','股票名称',true],['total_return_pct','总收益率',true],['max_drawdown_pct','最大回撤',true],['sharpe','夏普',true],['win_rate_pct','胜率',true],['last_buy_date','最近买入日期',true],['','数据时效',false]];
   return '<tr>'+cols.map(function(c){
     var key=c[0], label=c[1], sortable=c[2];
     if(!sortable) return '<th>'+label+'</th>';
@@ -915,8 +928,9 @@ function rowHtml(it){
   var dd=it.max_drawdown_pct==null?'—':Number(it.max_drawdown_pct).toFixed(2)+'%';
   var sh=it.sharpe==null?'—':Number(it.sharpe).toFixed(2);
   var wr=it.win_rate_pct==null?'—':Number(it.win_rate_pct).toFixed(2)+'%';
-  var stale=it.stale?'<span class="stale">数据较旧，建议重跑</span>':'';
-  return '<tr data-rid="'+it.run_id+'" onclick="openRun(this.dataset.rid)"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+wr+'</td><td>'+stale+'</td></tr>';
+  var lbd=it.last_buy_date==null?'—':it.last_buy_date;
+  var stale=it.stale?'<span class="stale">数据较旧，建议点「更新数据源」刷新行情后再重跑</span>':'';
+  return '<tr data-rid="'+it.run_id+'" onclick="openRun(this.dataset.rid)"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+wr+'</td><td>'+lbd+'</td><td>'+stale+'</td></tr>';
 }
 function openRun(rid){ window.open('/history?run_id='+rid); }
 function exportCsv(){
@@ -1138,9 +1152,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"sectors": storage_repo.batch_sector_status(batch_id)})
 
     def _api_submit_batch(self):
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length).decode("utf-8")
-        data = urllib.parse.parse_qs(raw)
+        data = self._parse_post_body()
         strategy = (data.get("strategy", ["kdj_macd_dual_entry"])[0] or "kdj_macd_dual_entry").strip() or "kdj_macd_dual_entry"
         scope_type = (data.get("scope_type", ["sector"])[0] or "sector").strip()
         scope_value = (data.get("scope_value", [""])[0] or "").strip()
@@ -1196,9 +1208,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _api_warmup_all(self):
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        raw = self.rfile.read(length).decode("utf-8") if length else ""
-        data = urllib.parse.parse_qs(raw)
+        data = self._parse_post_body()
         strategy = (data.get("strategy", ["kdj_macd_dual_entry"])[0] or "kdj_macd_dual_entry").strip() or "kdj_macd_dual_entry"
         try:
             cfg = load_strategy_by_arg(strategy)
@@ -1222,6 +1232,56 @@ class Handler(BaseHTTPRequestHandler):
                 "hit_count": hit_count,
                 "strategy_name": strategy_name,
                 "params_hash": ph,
+            }
+        )
+
+    def _api_data_update(self):
+        """POST /api/data/update：更新数据源（data-only 批次，不回测、不落库 run）。"""
+        data = self._parse_post_body()
+        scope_type = (data.get("scope_type", ["sector"])[0] or "sector").strip()
+        scope_value = (data.get("scope_value", [""])[0] or "").strip()
+        symbols_raw = (data.get("symbols", [""])[0] or "").strip()
+
+        items: list[dict] = []
+        if scope_type == "sector":
+            codes = [c.strip() for c in scope_value.split(",") if c.strip()]
+            stocks = storage_repo.get_sector_stocks()
+            seen: set[str] = set()
+            for code in codes:
+                for st in stocks.get(code, []):
+                    sym = st["code"]
+                    if sym in seen:
+                        continue
+                    seen.add(sym)
+                    items.append(
+                        {"symbol": sym, "symbol_name": st.get("name", sym), "sector_code": code}
+                    )
+        elif scope_type == "pool":
+            syms = [s.strip() for s in re.split(r"[,\s]+", symbols_raw) if s.strip()]
+            for s in syms:
+                items.append({"symbol": s, "symbol_name": s, "sector_code": None})
+        elif scope_type == "all_market":
+            items = _expand_all_market()
+        else:
+            self._send_json({"error": "未知 scope_type"}, status=400)
+            return
+
+        if not items:
+            self._send_json({"error": "没有可更新的标的（请检查范围选择）"}, status=400)
+            return
+
+        out_dir = get_data_dir()
+        batch_id, hit_count = batch_runner.submit_data_batch(
+            scope_type, scope_value, str(out_dir), items
+        )
+        self._send_json(
+            {
+                "batch_id": batch_id,
+                "total_count": len(items),
+                "hit_count": hit_count,
+                "batch_type": "data",
+                "strategy_name": "行情更新",
+                "params_hash": "__data__",
             }
         )
 
@@ -1290,9 +1350,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_404()
 
     def _handle_run(self):
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length).decode("utf-8")
-        data = urllib.parse.parse_qs(raw)
+        data = self._parse_post_body()
         symbols_raw = (data.get("symbols", [""])[0] or "").strip()
         symbols = [s for s in re.split(r"[,\s]+", symbols_raw) if s]
         if any(re.search(r"[\u4e00-\u9fff]", s) for s in symbols):
@@ -1310,13 +1368,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_compare(self):
         length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length).decode("utf-8")
+        raw = self.rfile.read(length)
         ctype = self.headers.get("Content-Type", "")
         if "application/json" in ctype:
             data = json.loads(raw)
             run_ids = list(data.get("run_ids", []))
         else:
-            data = urllib.parse.parse_qs(raw)
+            data = self._parse_post_body(raw=raw, ctype=ctype)
             run_ids = data.get("run_ids", [])
         if len(run_ids) < 1:
             raise ValueError("请至少选择 1 个回测结果进行对比。")
@@ -1333,6 +1391,65 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
         return html
+
+    def _parse_post_body(self, raw: bytes | None = None, ctype: str | None = None) -> dict[str, list[str]]:
+        """统一解析 POST body，兼容 urlencoded 与 multipart/form-data 两种编码。
+
+        返回结构与 ``urllib.parse.parse_qs`` 一致：``dict[str, list[str]]``，
+        以便现有 ``data.get(key, [default])[0]`` 用法无需改动。
+        """
+        if raw is None:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length <= 0:
+                return {}
+            raw = self.rfile.read(length)
+        if ctype is None:
+            ctype = self.headers.get("Content-Type", "")
+        ctype_lower = ctype.lower()
+        if "application/x-www-form-urlencoded" in ctype_lower:
+            try:
+                return urllib.parse.parse_qs(raw.decode("utf-8"))
+            except UnicodeDecodeError:
+                return {}
+        if "multipart/form-data" in ctype_lower:
+            return self._parse_multipart(raw, ctype)
+        # 兜底：尝试按 urlencoded 解析
+        try:
+            return urllib.parse.parse_qs(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            return {}
+
+    def _parse_multipart(self, raw: bytes, ctype: str) -> dict[str, list[str]]:
+        """解析 multipart/form-data 纯文本表单字段（无文件上传）。
+
+        本应用所有字段均为简单文本，故只做最小实现。
+        禁止使用已移除的 ``cgi`` 模块（Python 3.13+ 不可用）。
+        """
+        m = re.search(r'boundary=("?)([^";]+)\1', ctype)
+        if not m:
+            return {}
+        boundary = m.group(2).encode("utf-8")
+        result: dict[str, list[str]] = {}
+        for part in raw.split(b"--" + boundary):
+            if not part or part in (b"--", b"--\r\n"):
+                continue
+            # 段首可能带 \r\n（首个分隔符之后的部分）
+            if part.startswith(b"\r\n"):
+                part = part[2:]
+            # 头部与内容体以 \r\n\r\n 分隔
+            if b"\r\n\r\n" not in part:
+                continue
+            head, _, body = part.partition(b"\r\n\r\n")
+            name_m = re.search(r'(?:^|;)\s*name="([^"]*)"', head.decode("utf-8", "replace"))
+            if not name_m:
+                # 无 name 的字段（如仅含 filename 的文件域）直接跳过
+                continue
+            name = name_m.group(1)
+            # 内容体结尾通常带 \r\n，需去除
+            if body.endswith(b"\r\n"):
+                body = body[:-2]
+            result.setdefault(name, []).append(body.decode("utf-8", "replace"))
+        return result
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
@@ -1355,6 +1472,13 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/batch/warmup-all":
             try:
                 self._api_warmup_all()
+            except Exception as e:  # noqa: BLE001
+                import traceback
+                logger.error("[error] %s", traceback.format_exc())
+                self._send_json({"error": str(e)}, status=500)
+        elif path == "/api/data/update":
+            try:
+                self._api_data_update()
             except Exception as e:  # noqa: BLE001
                 import traceback
                 logger.error("[error] %s", traceback.format_exc())
@@ -1384,7 +1508,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _ranks_to_csv(items: list[dict]) -> str:
     """把排名 items 转为 CSV 文本（含 BOM 供 Excel）。"""
-    cols = ["run_id", "symbol", "symbol_name", "total_return_pct", "max_drawdown_pct", "sharpe", "end", "stale"]
+    cols = ["run_id", "symbol", "symbol_name", "total_return_pct", "max_drawdown_pct", "sharpe", "last_buy_date", "end", "stale"]
     lines = [",".join(cols)]
     for it in items:
         row = [
@@ -1394,6 +1518,7 @@ def _ranks_to_csv(items: list[dict]) -> str:
             "" if it.get("total_return_pct") is None else f"{it['total_return_pct']:.2f}",
             "" if it.get("max_drawdown_pct") is None else f"{it['max_drawdown_pct']:.2f}",
             "" if it.get("sharpe") is None else f"{it['sharpe']:.2f}",
+            it.get("last_buy_date", "") or "",
             it.get("end", "") or "",
             "1" if it.get("stale") else "0",
         ]

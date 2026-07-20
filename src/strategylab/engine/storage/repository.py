@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import json
 import math
+import os
 import uuid
 from typing import Any
 
@@ -29,6 +30,10 @@ from sqlalchemy.orm import joinedload
 from .db import SessionLocal, get_session, init_db
 from .schema import BacktestRun, EquityPoint, Trade, Summary, Batch, BatchItem
 from .serializers import db_row_to_result
+
+# FR-41：数据时效阈值（天），与 FR-31 共用单一真相源，可配 STRATEGALAB_STALE_DAYS。
+# 用于分析页标注「数据较旧」，引导用户先点『更新数据源』刷新行情再重跑。
+STALE_DAYS: int = int(os.environ.get("STRATEGALAB_STALE_DAYS", "30"))
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +372,72 @@ def find_existing_runs(
 
 
 # ---------------------------------------------------------------------------
+# FR-42 回测清空重跑：按维度删除历史结果（限定 batch_type='backtest'）
+# ---------------------------------------------------------------------------
+def clear_strategy_runs(
+    strategy_name: str,
+    params_hash: str,
+    data_source: str,
+) -> int:
+    """删除该维度下历史回测结果及关联明细，返回被删 run 数。
+
+    FR-42：回测入口 ``submit_batch`` 在 ``create_batch`` 之前调用本函数，
+    先清空该策略（``strategy_name + params_hash + data_source`` 全维度）此前产生的
+    全部 ``backtest_runs`` 及关联 ``equity_points`` / ``trades`` / ``summary`` /
+    ``batch_items``，再全量重跑所选范围。
+
+    隔离原则：``batches`` / ``batch_items`` 为 data/backtest 共用表，删除 **限定
+    ``batch_type='backtest'``**，绝不波及「更新数据源」写入的 data 批次与缓存 CSV。
+
+    Args:
+        strategy_name: 策略展示名。
+        params_hash: 参数指纹。
+        data_source: 数据源标识（如 ``eastmoney`` / ``akshare``）。
+
+    Returns:
+        被删 ``backtest_runs`` 行数。
+    """
+    with get_session() as s:
+        runs = (
+            s.query(BacktestRun.run_id)
+            .filter(
+                BacktestRun.strategy_name == strategy_name,
+                BacktestRun.params_hash == params_hash,
+                BacktestRun.data_source == data_source,
+            )
+            .all()
+        )
+        run_ids = [r.run_id for r in runs]
+        if not run_ids:
+            return 0
+        # 顺序 DELETE 关联明细（避免外键约束 / 触发器问题）
+        s.query(EquityPoint).filter(EquityPoint.run_id.in_(run_ids)).delete(
+            synchronize_session=False
+        )
+        s.query(Trade).filter(Trade.run_id.in_(run_ids)).delete(
+            synchronize_session=False
+        )
+        s.query(Summary).filter(Summary.run_id.in_(run_ids)).delete(
+            synchronize_session=False
+        )
+        # batch_items：仅删命中 run 的（data 批次 run_id 为 NULL，天然不受影响）；
+        # 额外限定 batch_type='backtest' 作双保险，避免误删 data 批次。
+        s.query(BatchItem).filter(
+            BatchItem.run_id.in_(run_ids),
+            BatchItem.batch_id.in_(
+                s.query(Batch.batch_id).filter(Batch.batch_type == "backtest")
+            ),
+        ).delete(synchronize_session=False)
+        # 删除 backtest_runs 主行
+        n = (
+            s.query(BacktestRun)
+            .filter(BacktestRun.run_id.in_(run_ids))
+            .delete(synchronize_session=False)
+        )
+        return int(n)
+
+
+# ---------------------------------------------------------------------------
 # FR-16 批次 CRUD
 # ---------------------------------------------------------------------------
 def create_batch(
@@ -378,8 +449,13 @@ def create_batch(
     scope_value: str,
     total_count: int,
     skipped_count: int = 0,
+    batch_type: str = "backtest",
 ) -> None:
-    """写入一条 batches 记录（status='running'）。"""
+    """写入一条 batches 记录（status='running'）。
+
+    Args:
+        batch_type: ``"backtest"``（回测批次）或 ``"data"``（数据源更新批次）。
+    """
     now = datetime.datetime.now(datetime.timezone.utc)
     with get_session() as s:
         s.add(
@@ -390,6 +466,7 @@ def create_batch(
                 params_hash=params_hash,
                 scope_type=scope_type,
                 scope_value=scope_value,
+                batch_type=batch_type,
                 total_count=int(total_count),
                 done_count=0,
                 failed_count=0,
@@ -498,6 +575,7 @@ def _batch_to_dict(b: Batch) -> dict[str, Any]:
         "params_hash": b.params_hash,
         "scope_type": b.scope_type,
         "scope_value": b.scope_value,
+        "batch_type": b.batch_type,
         "total_count": int(b.total_count),
         "done_count": int(b.done_count),
         "failed_count": int(b.failed_count),
@@ -612,32 +690,36 @@ def mark_interrupted_items() -> int:
 # ---------------------------------------------------------------------------
 # FR-20 排名查询 / FR-22 板块状态
 # ---------------------------------------------------------------------------
-_SECTORS_CACHE: list[dict[str, Any]] | None = None
-_SECTOR_STOCKS_CACHE: dict[str, list[dict[str, Any]]] | None = None
+_SECTORS_CACHE: "tuple[float | None, list[dict[str, Any]]] | None" = None
+_SECTOR_STOCKS_CACHE: "tuple[float | None, dict[str, list[dict[str, Any]]]] | None" = None
 
 
 def _load_sectors() -> list[dict[str, Any]]:
+    """读取 31 申万一级行业（带 mtime 失效缓存）。"""
     global _SECTORS_CACHE
-    if _SECTORS_CACHE is not None:
-        return _SECTORS_CACHE
     from ...settings import get_data_dir
 
     p = get_data_dir() / "sectors.json"
-    _SECTORS_CACHE = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
-    return _SECTORS_CACHE
+    mtime = p.stat().st_mtime if p.exists() else None
+    if _SECTORS_CACHE is not None and _SECTORS_CACHE[0] == mtime:
+        return _SECTORS_CACHE[1]
+    data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+    _SECTORS_CACHE = (mtime, data)
+    return data
 
 
 def _load_sector_stocks() -> dict[str, list[dict[str, Any]]]:
+    """读取 板块 code → 成分股列表 映射（带 mtime 失效缓存）。"""
     global _SECTOR_STOCKS_CACHE
-    if _SECTOR_STOCKS_CACHE is not None:
-        return _SECTOR_STOCKS_CACHE
     from ...settings import get_data_dir
 
     p = get_data_dir() / "sector_stocks.json"
-    _SECTOR_STOCKS_CACHE = (
-        json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-    )
-    return _SECTOR_STOCKS_CACHE
+    mtime = p.stat().st_mtime if p.exists() else None
+    if _SECTOR_STOCKS_CACHE is not None and _SECTOR_STOCKS_CACHE[0] == mtime:
+        return _SECTOR_STOCKS_CACHE[1]
+    data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    _SECTOR_STOCKS_CACHE = (mtime, data)
+    return data
 
 
 def get_sectors() -> list[dict[str, Any]]:
@@ -698,12 +780,25 @@ def rank_runs(
             .all()
         )
 
+        # FR-43：按 run_id 聚合 MAX(trades.entry_date)（一条分组聚合，避免 N+1）。
+        # trades 仅 A 股多头（side='long' 固定），无需 side 过滤；无 trades 的 run → None。
+        run_ids = [r.run_id for r in all_rows]
+        buy_map: dict[str, str | None] = {}
+        if run_ids:
+            sub = (
+                s.query(Trade.run_id, func.max(Trade.entry_date).label("last_buy_date"))
+                .filter(Trade.run_id.in_(run_ids))
+                .group_by(Trade.run_id)
+                .all()
+            )
+            buy_map = {rid: (d.isoformat() if d else None) for rid, d in sub}
+
         items: list[dict[str, Any]] = []
         today = datetime.date.today()
         for r in all_rows:
             summ = r.summary
             end_d = r.end
-            stale = bool(end_d is not None and (today - end_d).days > 30)
+            stale = bool(end_d is not None and (today - end_d).days > STALE_DAYS)
             items.append(
                 {
                     "run_id": r.run_id,
@@ -727,6 +822,7 @@ def rank_runs(
                         if summ and summ.win_rate_pct is not None
                         else None
                     ),
+                    "last_buy_date": buy_map.get(r.run_id),  # FR-43：最近买入日期（ISO，无则为 None）
                     "end": r.end.isoformat() if r.end else None,
                     "stale": stale,
                     "_created_at": r.created_at,  # 去重辅助字段
@@ -749,6 +845,7 @@ def rank_runs(
             "max_drawdown_pct",
             "sharpe",
             "win_rate_pct",
+            "last_buy_date",  # FR-43：最近买入日期（NULL 统一排末尾，沿用 FR-20 规则）
         }
         if sort_by in _ALLOWED_SORT:
             _reverse = order == "desc"

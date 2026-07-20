@@ -1,0 +1,104 @@
+classDiagram
+    %% ===== 存储层 =====
+    class Batch {
+        +String batch_id PK
+        +String strategy_name
+        +String strategy_type
+        +String params_hash
+        +String scope_type
+        +String scope_value
+        +String batch_type : 新增，区分 backtest/data
+        +int total_count
+        +int done_count
+        +int failed_count
+        +int skipped_count
+        +String status
+        +DateTime started_at
+        +DateTime finished_at
+        +DateTime created_at
+    }
+    class BatchItem {
+        +int id PK
+        +String batch_id FK
+        +String symbol
+        +String symbol_name
+        +String sector_code
+        +String status
+        +String run_id : data 批次恒为 NULL
+        +bool is_reused
+        +Text error_msg : data 批次可存"已是最新/新增N天"
+        +DateTime started_at
+        +DateTime finished_at
+    }
+    class BacktestRun {
+        +String run_id PK
+        +String strategy_name
+        +String params_hash
+        +String symbol
+        +Date end : FR-41 时效判定基准
+        +String data_source
+    }
+
+    %% ===== 数据源层 =====
+    class KlineCache {
+        +load(spec, source, period, beg, end, out_dir) DataFrame
+        +save(spec, source, period, df, beg, end, out_dir) Path
+        +merge(spec, source, period, new_df, out_dir) Path : 读旧+合并去重+写回
+        +_covers(meta, beg, end) bool
+        +_incremental_window(meta, today, default_beg) String : 返回 last+1 或 None
+        +_read_any_meta(out_dir, prefix, source, period) tuple
+        +_atomic_write_csv(df, path) int
+        +_atomic_write_meta(meta, path)
+    }
+    class KlineProvider {
+        +ensure_data(symbol_cfg, out_dir, ..., mode, required_beg, required_end) tuple : mode='update'|'verify'
+        -_try_fetch(symbol, spec, period, beg, end, lmt) DataFrame
+    }
+    class DataSource {
+        <<interface>>
+        +fetch_kline(symbol, klt, beg, end, lmt) DataFrame
+    }
+    class DataMissingError {
+        +str symbol : verify 模式行情不足时抛出
+    }
+
+    %% ===== 执行层 =====
+    class BatchRunner {
+        +submit_batch(...) tuple : 回测，FR-42 前置 clear_strategy_runs + 全量重跑
+        +submit_data_batch(...) tuple : 更新数据源，不落库 run
+        -_run_one(...) : 回测单只
+        -_run_one_data(...) : 数据单只 ensure_data(mode='update')
+        +get_progress(batch_id) dict
+        +cancel_batch(batch_id) bool
+        +init_batch_runner()
+    }
+    class Repository {
+        +find_existing_runs(strategy_name, params_hash, symbols, data_source) dict : 保留，回测主链路不再用
+        +clear_strategy_runs(strategy_name, params_hash, data_source) int : FR-42 前置清空(限定 batch_type='backtest')
+        +create_batch(...) : 新增 batch_type 形参
+        +rank_runs(...) dict : FR-41 用 STALE_DAYS；FR-43 聚合 last_buy_date + sort_by 白名单
+        +batch_sector_status(batch_id) list : data/backtest 复用
+    }
+
+    %% ===== Web 层 =====
+    class WebHandler {
+        +_api_data_update() : POST /api/data/update
+        +_api_submit_batch() : 回测入口（不变）
+        +_api_batch_progress(batch_id) : data/backtest 复用
+        +build_production_html() : FR-37 双按钮
+        +build_analysis_html() : FR-41 stale 文案；FR-43 新增"最近买入日期"列+列头排序
+    }
+
+    %% ===== 关系 =====
+    Batch "1" *-- "0..*" BatchItem : contains
+    BatchItem }o--o| BacktestRun : run_id(可空)
+    KlineProvider ..> KlineCache : 读写缓存
+    KlineProvider ..> DataSource : fetch
+    KlineProvider ..> DataMissingError : 抛错(verify)
+    BatchRunner ..> KlineProvider : ensure_data(mode)
+    BatchRunner ..> Repository : 批次CRUD/进度
+    Repository ..> Batch
+    Repository ..> BatchItem
+    WebHandler ..> BatchRunner : submit_data_batch / submit_batch
+    WebHandler ..> Repository : rank / sector_status
+    BacktestRun ..> KlineCache : 取数(经 provider)

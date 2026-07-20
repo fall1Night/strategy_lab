@@ -19,11 +19,12 @@ import os
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from .storage import repository
 from .backtest import run_symbol
-from .data_feed import normalize_symbol
+from .data_feed import normalize_symbol, ensure_data
 from .datasource.config import DataSourceConfig
 from .datasource.factory import DataSourceFactory
 
@@ -60,68 +61,49 @@ def submit_batch(
         items: 元素 ``{"symbol", "symbol_name", "sector_code": Optional}``。
 
     Returns:
-        ``(batch_id, hit_count)``：hit_count 为命中的 skipped 数量。
+        ``(batch_id, hit_count)``：FR-42 起不再命中跳过，hit_count 恒为 0（全量重跑）。
     """
     batch_id = repository.create_batch_id()
     # 归一化 symbol：run_symbol 内部会用 data_feed.normalize_symbol 把标的写成
-    # "600216.SH" 格式落库（backtest_runs.symbol），命中复用必须以同一格式比对，
-    # 否则 batch_items.symbol（如 "bj920000"）永远匹配不上 backtest_runs.symbol
-    # （如 "920000.BJ"），导致命中复用/跳过全部失效。
+    # "600216.SH" 格式落库（backtest_runs.symbol），清空维度必须以同一格式比对。
     for it in items:
         it["symbol"] = normalize_symbol(it["symbol"])["symbol"]
     symbols = [it["symbol"] for it in items]
 
-    # P0-4：计算每个标的的 effective source（用于命中复用键扩展 + 落库 data_source）
+    # 计算每个标的的 effective source（用于清空维度 + 落库 data_source）
     ds_cfg = DataSourceConfig.from_env()
     ds_factory = DataSourceFactory(ds_cfg)
     symbol_source_map: dict[str, str] = {}
     for sym in symbols:
         symbol_source_map[sym] = ds_factory.get_effective_source(sym)
-    # 用 majority source 查询复用（同批大多数标的同源）
+    # 用 majority source 作为清空维度（同批大多数标的同源）
     source_for_lookup = (
         max(set(symbol_source_map.values()), key=list(symbol_source_map.values()).count)
         if symbol_source_map
         else ds_cfg.default_source
     )
 
-    # 命中预查：strategy_name + source + symbol + params_hash 一致的最新 run
-    existing = repository.find_existing_runs(
-        strategy_name, params_hash, symbols, data_source=source_for_lookup
-    )
-    hit_count = 0
+    # FR-42：回测前置清空该维度历史结果（策略全维度，不限所选范围），再全量重跑。
+    # 不再走 find_existing_runs 命中跳过；verify 模式缺数据由 _run_one 标记 failed。
+    repository.clear_strategy_runs(strategy_name, params_hash, source_for_lookup)
 
+    # 全量重跑：所有标的均为 pending（不再命中复用）
     batch_items: list[dict[str, Any]] = []
-    pending_items: list[dict[str, Any]] = []
     for it in items:
         sym = it["symbol"]
-        if sym in existing:
-            hit_count += 1
-            batch_items.append(
-                {
-                    "batch_id": batch_id,
-                    "symbol": sym,
-                    "symbol_name": it.get("symbol_name") or sym,
-                    "sector_code": it.get("sector_code"),
-                    "status": "skipped",
-                    "run_id": existing[sym],
-                    "is_reused": True,
-                }
-            )
-        else:
-            batch_items.append(
-                {
-                    "batch_id": batch_id,
-                    "symbol": sym,
-                    "symbol_name": it.get("symbol_name") or sym,
-                    "sector_code": it.get("sector_code"),
-                    "status": "pending",
-                    "run_id": None,
-                    "is_reused": False,
-                }
-            )
-            pending_items.append(it)
+        batch_items.append(
+            {
+                "batch_id": batch_id,
+                "symbol": sym,
+                "symbol_name": it.get("symbol_name") or sym,
+                "sector_code": it.get("sector_code"),
+                "status": "pending",
+                "run_id": None,
+                "is_reused": False,
+            }
+        )
 
-    # 写批次 + 批量写 items（skipped 计数在 create_batch 时一并写入）
+    # 写批次 + 批量写 items（FR-42 不再有 skipped）
     repository.create_batch(
         batch_id=batch_id,
         strategy_name=strategy_name,
@@ -130,7 +112,8 @@ def submit_batch(
         scope_type=scope_type,
         scope_value=scope_value,
         total_count=len(items),
-        skipped_count=hit_count,
+        skipped_count=0,
+        batch_type="backtest",
     )
     repository.bulk_create_batch_items(batch_items)
 
@@ -138,14 +121,105 @@ def submit_batch(
     with _CANCEL_LOCK:
         _CANCEL_FLAGS[batch_id] = threading.Event()
 
-    # 后台并发执行（仅 pending 项入队）
+    # 后台并发执行（全量所选范围）
     ex = ThreadPoolExecutor(max_workers=WORKERS)
     with _EXEC_LOCK:
         _EXECUTORS[batch_id] = ex
-    for it in pending_items:
+    for it in items:
         ex.submit(_run_one, batch_id, strategy_cfg, params_hash, out_dir, it)
 
     # 收尾线程：等所有任务完成后置最终状态
+    threading.Thread(target=_watch, args=(batch_id, ex), daemon=True).start()
+
+    return batch_id, 0
+
+
+def submit_data_batch(
+    scope_type: str,
+    scope_value: str,
+    out_dir: str,
+    items: list[dict[str, Any]],
+) -> tuple[str, int]:
+    """提交一个 data-only 批次（仅更新数据源，不回测、不落库 backtest_runs）。
+
+    FR-38：复用 batches/batch_items 全套机制（batch_type='data'），进度 / 取消 /
+    板块总览 / 重启-interrupted 全部复用，不新建表；data 批次 ``batch_items.run_id``
+    恒为 ``None``。
+
+    Args:
+        scope_type: ``sector`` / ``pool`` / ``all_market``。
+        scope_value: 板块 codes / 池 symbols / ``"ALL"``。
+        out_dir: 行情缓存目录。
+        items: 元素 ``{"symbol", "symbol_name", "sector_code": Optional}``。
+
+    Returns:
+        ``(batch_id, hit_count)``：hit_count = 已是最新（无需取数）的标的数。
+    """
+    batch_id = repository.create_batch_id()
+    for it in items:
+        it["symbol"] = normalize_symbol(it["symbol"])["symbol"]
+
+    # 预先判定「已是最新」数（不触发取数）：日线/周线增量窗口均为 None 即无需更新。
+    latest_syms: set[str] = set()
+    try:
+        from .datasource.provider import get_provider
+
+        prov = get_provider()
+        out_dir_p = Path(out_dir)
+        today = datetime.date.today().strftime("%Y%m%d")
+        for it in items:
+            sym = it["symbol"]
+            eff = prov._factory.get_effective_source(sym)
+            prefix = normalize_symbol(sym)["prefix"]
+            d_meta, *_ = prov._cache._read_any_meta(out_dir_p, prefix, eff, "daily")
+            w_meta, *_ = prov._cache._read_any_meta(out_dir_p, prefix, eff, "weekly")
+            d_need = prov._cache._incremental_window(d_meta, today, "20220706") is not None
+            w_need = prov._cache._incremental_window(w_meta, today, "20211210") is not None
+            if not d_need and not w_need:
+                latest_syms.add(sym)
+    except Exception:  # noqa: BLE001
+        # 预判定失败不应阻断提交，仅视为「需要更新」
+        latest_syms = set()
+
+    hit_count = len(latest_syms)
+    batch_items: list[dict[str, Any]] = []
+    for it in items:
+        is_latest = it["symbol"] in latest_syms
+        batch_items.append(
+            {
+                "batch_id": batch_id,
+                "symbol": it["symbol"],
+                "symbol_name": it.get("symbol_name") or it["symbol"],
+                "sector_code": it.get("sector_code"),
+                "status": "skipped" if is_latest else "pending",
+                "run_id": None,
+                "is_reused": False,
+                "error_msg": "已是最新" if is_latest else None,
+            }
+        )
+
+    repository.create_batch(
+        batch_id=batch_id,
+        strategy_name="行情更新",
+        strategy_type="data",
+        params_hash="__data__",
+        scope_type=scope_type,
+        scope_value=scope_value,
+        total_count=len(items),
+        skipped_count=hit_count,
+        batch_type="data",
+    )
+    repository.bulk_create_batch_items(batch_items)
+
+    with _CANCEL_LOCK:
+        _CANCEL_FLAGS[batch_id] = threading.Event()
+
+    ex = ThreadPoolExecutor(max_workers=WORKERS)
+    with _EXEC_LOCK:
+        _EXECUTORS[batch_id] = ex
+    for it in items:
+        if it["symbol"] not in latest_syms:
+            ex.submit(_run_one_data, batch_id, out_dir, it)
     threading.Thread(target=_watch, args=(batch_id, ex), daemon=True).start()
 
     return batch_id, hit_count
@@ -189,6 +263,52 @@ def _run_one(
             symbol,
             status="done",
             run_id=res.get("run_id"),
+            finished_at=datetime.datetime.now(datetime.timezone.utc),
+        )
+        repository.inc_batch_count(batch_id, "done_count")
+    except Exception as e:  # noqa: BLE001
+        repository.update_batch_item(
+            batch_id,
+            symbol,
+            status="failed",
+            error_msg=str(e)[:2000],
+            finished_at=datetime.datetime.now(datetime.timezone.utc),
+        )
+        repository.inc_batch_count(batch_id, "failed_count")
+
+
+def _run_one_data(
+    batch_id: str,
+    out_dir: str,
+    item: dict[str, Any],
+) -> None:
+    """数据源更新单只执行（后台线程）：增量取数并 merge 写回，不落库回测 run。
+
+    FR-38：调用 ``ensure_data(mode='update')`` 仅刷新行情缓存 CSV；任何失败
+    标记 batch_item 为 failed，但绝不触发回测逻辑。
+    """
+    symbol = item["symbol"]
+    symbol_name = item.get("symbol_name") or symbol
+
+    ev = _CANCEL_FLAGS.get(batch_id)
+    if ev is not None and ev.is_set():
+        repository.update_batch_item(batch_id, symbol, status="cancelled")
+        return
+
+    repository.update_batch_item(
+        batch_id,
+        symbol,
+        status="running",
+        started_at=datetime.datetime.now(datetime.timezone.utc),
+    )
+    try:
+        sym_cfg = normalize_symbol(symbol)
+        # FR-39：增量取数 + merge 写回，仅更新数据源
+        ensure_data(sym_cfg, out_dir, mode="update")
+        repository.update_batch_item(
+            batch_id,
+            symbol,
+            status="done",
             finished_at=datetime.datetime.now(datetime.timezone.utc),
         )
         repository.inc_batch_count(batch_id, "done_count")

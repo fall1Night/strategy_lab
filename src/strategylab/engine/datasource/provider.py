@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ import threading
 from .base import DataSource, SymbolSpec, normalize_symbol
 from .cache import KlineCache
 from .config import DataSourceConfig
-from .exceptions import AllSourcesFailedError, DataSourceError
+from .exceptions import AllSourcesFailedError, DataMissingError, DataSourceError
 from .factory import DataSourceFactory
 from .switch_log import SwitchEvent, SwitchLog
 
@@ -98,24 +99,31 @@ class KlineProvider:
         weekly_beg: str = "20211210",
         weekly_end: str = "20260718",
         weekly_lmt: int = 500,
+        mode: str = "update",
+        required_beg: str | None = None,
+        required_end: str | None = None,
     ) -> tuple[Path, Path]:
         """拉取或复用日线/周线 CSV，返回 (daily_csv, weekly_csv) 路径。
 
-        签名与旧 ``data_feed.ensure_data`` 完全一致。
-        缓存文件名带 source 标识：``<prefix>_<source>_<period>.csv``。
+        新增 ``mode``（FR-39/40）：
+          - ``"update"``（默认，向后兼容旧行为）：增量取数 + ``cache.merge`` 写回。
+          - ``"verify"``：仅校验缓存覆盖所需区间，缺失即抛 ``DataMissingError``，
+            绝不取数（仅「回测」用；缺数据由上层标记 failed 并提示先更新数据源）。
 
         Args:
             symbol_cfg: ``normalize_symbol`` 返回的 dict（含 symbol/secid/prefix）。
             out_dir: 缓存输出目录。
-            daily_beg: 日线起始 YYYYMMDD。
-            daily_end: 日线结束 YYYYMMDD。
-            daily_lmt: 日线条数上限。
-            weekly_beg: 周线起始 YYYYMMDD。
-            weekly_end: 周线结束 YYYYMMDD。
-            weekly_lmt: 周线条数上限。
+            daily_beg/daily_end: 日线默认区间（update 模式作首拉 genesis / verify 兜底）。
+            weekly_beg/weekly_end: 周线默认区间。
+            daily_lmt/weekly_lmt: 条数上限。
+            mode: ``"update"`` 或 ``"verify"``。
+            required_beg/required_end: verify 模式日线所需覆盖区间（默认回落 daily_beg/daily_end）。
 
         Returns:
             ``(daily_csv_path, weekly_csv_path)``。
+
+        Raises:
+            DataMissingError: verify 模式下缓存未覆盖所需区间时。
         """
         out_dir = Path(out_dir)
         prefix: str = symbol_cfg["prefix"]
@@ -130,88 +138,174 @@ class KlineProvider:
         daily_csv = out_dir / f"{prefix}_{effective_source}_daily.csv"
         weekly_csv = out_dir / f"{prefix}_{effective_source}_weekly.csv"
 
-        # 区间覆盖判断（meta 缺失视为缓存不存在 → 触发重取）
-        need_daily = not self._cache._covers(
-            self._cache._read_any_meta(out_dir, prefix, effective_source, "daily")[0],
-            daily_beg,
-            daily_end,
+        if mode == "verify":
+            return self._ensure_verify(
+                symbol, prefix, effective_source, out_dir,
+                daily_csv, weekly_csv,
+                daily_beg, daily_end, weekly_beg, weekly_end,
+                required_beg, required_end,
+            )
+
+        # ---------- mode == "update"（增量取数 + merge 写回） ----------
+        today = date.today().strftime("%Y%m%d")
+
+        daily_meta, _, is_legacy_d = self._cache._read_any_meta(
+            out_dir, prefix, effective_source, "daily"
         )
-        need_weekly = not self._cache._covers(
-            self._cache._read_any_meta(out_dir, prefix, effective_source, "weekly")[0],
-            weekly_beg,
-            weekly_end,
+        weekly_meta, _, is_legacy_w = self._cache._read_any_meta(
+            out_dir, prefix, effective_source, "weekly"
         )
-        # 也检查旧格式缓存（兼容 eastmoney）
-        if need_daily and effective_source == "eastmoney":
+
+        # 增量窗口：取数起点 = meta.last + 1；已最新则返回 None（幂等）
+        daily_beg_calc = self._cache._incremental_window(daily_meta, today, daily_beg)
+        weekly_beg_calc = self._cache._incremental_window(weekly_meta, today, weekly_beg)
+        need_daily = daily_beg_calc is not None
+        need_weekly = weekly_beg_calc is not None
+
+        # 旧格式兼容：新格式无 meta 但旧格式已是最新 → 视为最新、用旧路径跳过
+        if need_daily and effective_source == "eastmoney" and is_legacy_d:
             old_meta = self._cache._read_meta(
                 self._cache._legacy_meta_path(out_dir, prefix, "daily")
             )
-            need_daily = not self._cache._covers(old_meta, daily_beg, daily_end)
-            if not need_daily:
+            if old_meta and old_meta.get("last") and old_meta["last"] >= today:
+                need_daily = False
                 daily_csv = self._cache._legacy_csv_path(out_dir, prefix, "daily")
-        if need_weekly and effective_source == "eastmoney":
+        if need_weekly and effective_source == "eastmoney" and is_legacy_w:
             old_meta = self._cache._read_meta(
                 self._cache._legacy_meta_path(out_dir, prefix, "weekly")
             )
-            need_weekly = not self._cache._covers(old_meta, weekly_beg, weekly_end)
-            if not need_weekly:
+            if old_meta and old_meta.get("last") and old_meta["last"] >= today:
+                need_weekly = False
                 weekly_csv = self._cache._legacy_csv_path(out_dir, prefix, "weekly")
 
         if not need_daily and not need_weekly:
-            print(f"  [复用缓存] {symbol}: 缓存区间已覆盖，跳过取数")
+            print(f"  [增量复用] {symbol}: 行情已是最新，跳过取数")
             return daily_csv, weekly_csv
 
-        # 进程内 symbol 锁
+        # 进程内 symbol 锁（防并发重复取数）
         with _SYMBOL_LOCKS[secid]:
             # 二次检查（获取锁后可能已被其他线程填好）
-            need_daily = not self._cache._covers(
-                self._cache._read_any_meta(out_dir, prefix, effective_source, "daily")[0],
-                daily_beg,
-                daily_end,
+            daily_meta, _, _ = self._cache._read_any_meta(
+                out_dir, prefix, effective_source, "daily"
             )
-            need_weekly = not self._cache._covers(
-                self._cache._read_any_meta(out_dir, prefix, effective_source, "weekly")[0],
-                weekly_beg,
-                weekly_end,
+            weekly_meta, _, _ = self._cache._read_any_meta(
+                out_dir, prefix, effective_source, "weekly"
             )
-            if need_daily and effective_source == "eastmoney":
+            daily_beg_calc = self._cache._incremental_window(daily_meta, today, daily_beg)
+            weekly_beg_calc = self._cache._incremental_window(weekly_meta, today, weekly_beg)
+            need_daily = daily_beg_calc is not None
+            need_weekly = weekly_beg_calc is not None
+            if need_daily and effective_source == "eastmoney" and is_legacy_d:
                 old_meta = self._cache._read_meta(
                     self._cache._legacy_meta_path(out_dir, prefix, "daily")
                 )
-                need_daily = not self._cache._covers(old_meta, daily_beg, daily_end)
-            if need_weekly and effective_source == "eastmoney":
+                if old_meta and old_meta.get("last") and old_meta["last"] >= today:
+                    need_daily = False
+                    daily_csv = self._cache._legacy_csv_path(out_dir, prefix, "daily")
+            if need_weekly and effective_source == "eastmoney" and is_legacy_w:
                 old_meta = self._cache._read_meta(
                     self._cache._legacy_meta_path(out_dir, prefix, "weekly")
                 )
-                need_weekly = not self._cache._covers(old_meta, weekly_beg, weekly_end)
+                if old_meta and old_meta.get("last") and old_meta["last"] >= today:
+                    need_weekly = False
+                    weekly_csv = self._cache._legacy_csv_path(out_dir, prefix, "weekly")
 
             n_d: int = 0
             n_w: int = 0
 
             if need_daily:
+                days = (
+                    self._cache._parse_yyyymmdd(today)
+                    - self._cache._parse_yyyymmdd(daily_beg_calc)
+                ).days + 1
+                lmt = max(daily_lmt, (days + 10) * 2)
                 df_daily = self._try_fetch(
-                    symbol, spec, "daily", daily_beg, daily_end, daily_lmt
+                    symbol, spec, "daily", daily_beg_calc, today, lmt
                 )
-                daily_csv = self._cache.save(
-                    spec, effective_source, "daily", df_daily, daily_beg, daily_end, out_dir
+                daily_csv = self._cache.merge(
+                    spec, effective_source, "daily", df_daily, out_dir
                 )
                 n_d = len(df_daily)
-                from .base import random_sleep; random_sleep(0.5, 1.5)
+                from .base import random_sleep
+
+                random_sleep(0.5, 1.5)
 
             if need_weekly:
+                days = (
+                    self._cache._parse_yyyymmdd(today)
+                    - self._cache._parse_yyyymmdd(weekly_beg_calc)
+                ).days + 1
+                lmt = max(weekly_lmt, (days + 10) * 2)
                 df_weekly = self._try_fetch(
-                    symbol, spec, "weekly", weekly_beg, weekly_end, weekly_lmt
+                    symbol, spec, "weekly", weekly_beg_calc, today, lmt
                 )
-                weekly_csv = self._cache.save(
-                    spec, effective_source, "weekly", df_weekly, weekly_beg, weekly_end, out_dir
+                weekly_csv = self._cache.merge(
+                    spec, effective_source, "weekly", df_weekly, out_dir
                 )
                 n_w = len(df_weekly)
-                from .base import random_sleep; random_sleep(0.5, 1.5)
+                from .base import random_sleep
+
+                random_sleep(0.5, 1.5)
 
         print(
-            f"  [取数] {symbol}: 日线 {n_d if need_daily else '复用'} 条 "
+            f"  [增量取数] {symbol}: 日线 {n_d if need_daily else '复用'} 条 "
             f"/ 周线 {n_w if need_weekly else '复用'} 条"
         )
+        return daily_csv, weekly_csv
+
+    def _ensure_verify(
+        self,
+        symbol: str,
+        prefix: str,
+        effective_source: str,
+        out_dir: Path,
+        daily_csv: Path,
+        weekly_csv: Path,
+        daily_beg: str,
+        daily_end: str,
+        weekly_beg: str,
+        weekly_end: str,
+        required_beg: str | None,
+        required_end: str | None,
+    ) -> tuple[Path, Path]:
+        """verify 模式：仅校验缓存覆盖所需区间，不足抛 ``DataMissingError``，绝不取数。
+
+        FR-40：回测只校验、不取数；缺数据即由上层标记 failed 并提示先更新数据源。
+        """
+        rb = required_beg if required_beg else daily_beg
+        re = required_end if required_end else daily_end
+
+        daily_meta, _, is_legacy_d = self._cache._read_any_meta(
+            out_dir, prefix, effective_source, "daily"
+        )
+        weekly_meta, _, is_legacy_w = self._cache._read_any_meta(
+            out_dir, prefix, effective_source, "weekly"
+        )
+        daily_ok = self._cache._covers(daily_meta, rb, re)
+        weekly_ok = self._cache._covers(weekly_meta, weekly_beg, weekly_end)
+
+        # 旧格式兼容回退
+        if not daily_ok and effective_source == "eastmoney" and is_legacy_d:
+            old_meta = self._cache._read_meta(
+                self._cache._legacy_meta_path(out_dir, prefix, "daily")
+            )
+            if self._cache._covers(old_meta, rb, re):
+                daily_ok = True
+                daily_csv = self._cache._legacy_csv_path(out_dir, prefix, "daily")
+        if not weekly_ok and effective_source == "eastmoney" and is_legacy_w:
+            old_meta = self._cache._read_meta(
+                self._cache._legacy_meta_path(out_dir, prefix, "weekly")
+            )
+            if self._cache._covers(old_meta, weekly_beg, weekly_end):
+                weekly_ok = True
+                weekly_csv = self._cache._legacy_csv_path(out_dir, prefix, "weekly")
+
+        if not (daily_ok and weekly_ok):
+            raise DataMissingError(
+                symbol,
+                f"行情缺失/不足（日线覆盖={daily_ok}，周线覆盖={weekly_ok}），"
+                f"请先点『更新数据源』刷新后再回测",
+            )
         return daily_csv, weekly_csv
 
     def _try_fetch(
@@ -302,9 +396,16 @@ def ensure_data(
     weekly_beg: str = "20211210",
     weekly_end: str = "20260718",
     weekly_lmt: int = 500,
+    mode: str = "update",
+    required_beg: str | None = None,
+    required_end: str | None = None,
 ) -> tuple[Path, Path]:
-    """模块级便捷函数：委托 ``KlineProvider.ensure_data``。"""
+    """模块级便捷函数：委托 ``KlineProvider.ensure_data``。
+
+    透传 ``mode`` / ``required_beg`` / ``required_end``（FR-39/40）。
+    """
     return get_provider().ensure_data(
         symbol_cfg, out_dir, daily_beg, daily_end, daily_lmt,
         weekly_beg, weekly_end, weekly_lmt,
+        mode, required_beg, required_end,
     )

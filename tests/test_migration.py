@@ -106,10 +106,10 @@ def test_migrate_v1_to_v2():
         for t in ("batches", "batch_items", "schema_version"):
             assert insp.has_table(t), f"迁移后缺少表: {t}"
 
-        # 3) schema_version = 2
+        # 3) schema_version = 3（3.0 当前版本；v1→v3 迁移链完成后 MAX 版本应为 3）
         from strategylab.engine.storage import migrate as migrate_mod
 
-        assert migrate_mod.get_version() == 2, "schema_version 应为 2"
+        assert migrate_mod.get_version() == 3, "schema_version 应为 3"
 
         # 4) 老 run 的 params_hash 被回填（len==40，与 compute_params_hash 一致）
         with db.SessionLocal() as s:
@@ -186,4 +186,4 @@ def test_migration_idempotent():
             count = len(vs)
             max_ver = max(int(v.version) for v in vs)
         assert count == 1, f"版本行不应重复插入，实际 {count} 行"
-        assert max_ver == 2
+        assert max_ver == 3

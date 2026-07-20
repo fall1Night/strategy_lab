@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +114,123 @@ class KlineCache:
         if not mb or not me:
             return False
         return mb <= beg and me >= end
+
+    # ------------------------------------------------------------------
+    # 增量更新辅助（FR-39：append 而非整文件覆盖）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _empty_kline_df() -> "pd.DataFrame":
+        """返回空 K 线 DataFrame（列与缓存一致）。"""
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close"])
+
+    @staticmethod
+    def _parse_yyyymmdd(value: str) -> "datetime":
+        """将 ``YYYYMMDD`` 字符串解析为 ``datetime``（用于增量窗口天数计算）。"""
+        return datetime.strptime(value, "%Y%m%d")
+
+    @staticmethod
+    def _normalize_dates(df: "pd.DataFrame") -> "pd.DataFrame":
+        """把 ``date`` 列规整为 ``YYYY-MM-DD`` 字符串，统一新旧数据格式便于去重。"""
+        df = df.copy()
+        if "date" not in df.columns:
+            return df
+        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+        return df
+
+    def _incremental_window(
+        self,
+        meta: dict[str, Any] | None,
+        today_yyyymmdd: str,
+        default_beg: str,
+    ) -> str | None:
+        """返回本次应取数的起点 ``YYYYMMDD``；无需取数返回 ``None``。
+
+        Args:
+            meta: 缓存 meta（含实际最后交易日 ``last``）；``None`` 表示无缓存。
+            today_yyyymmdd: 今天 ``YYYYMMDD``。
+            default_beg: 无缓存时的首拉起点（genesis）。
+
+        Returns:
+            取数起点（``last + 1`` 个日历日）；若 ``last >= today`` 则 ``None``
+            （已最新，幂等跳过）。
+        """
+        if not meta or not meta.get("last"):
+            return default_beg  # 无缓存 → 从 genesis 全量首拉
+        last = str(meta["last"])  # 实际最后交易日 YYYYMMDD
+        if last >= today_yyyymmdd:
+            return None  # 已最新（含周末）→ 幂等跳过
+        nxt = (self._parse_yyyymmdd(last) + timedelta(days=1)).strftime("%Y%m%d")
+        return nxt  # 从末日+1 起追加
+
+    def merge(
+        self,
+        spec: "SymbolSpec",
+        source: str,
+        period: str,
+        new_df: "pd.DataFrame",
+        out_dir: "Path | str | None" = None,
+    ) -> Path:
+        """读旧 CSV → 与 ``new_df`` 按 ``date`` 合并去重（保留较新）→ 排序 → 原子写回。
+
+        设计要点（FR-39）：
+          - 历史 ``beg`` 不丢：合并后首行即全量最早日。
+          - ``last`` 推进到实际末日（取回数据的最大 ``date``），而非请求 ``end``。
+          - 原子写：临时文件 + ``os.replace``，与 ``save`` 同方案。
+
+        Args:
+            spec: ``SymbolSpec`` 实例。
+            source: 数据源名称。
+            period: 周期标识（``"daily"`` / ``"weekly"``）。
+            new_df: 本次取回的 K 线 DataFrame。
+            out_dir: 缓存目录。
+
+        Returns:
+            写回的 CSV 文件 ``Path``。
+        """
+        if out_dir is None:
+            from ...settings import get_data_dir
+
+            out_dir = get_data_dir()
+
+        out_dir = Path(out_dir)
+        prefix = spec.prefix
+        csv_path = self._csv_path(out_dir, prefix, source, period)
+        meta_path = self._meta_path(out_dir, prefix, source, period)
+
+        # 旧 CSV（不存在则空 DF）；日期统一规整为 ``YYYY-MM-DD`` 字符串以便去重
+        if csv_path.exists():
+            old = pd.read_csv(csv_path)
+        else:
+            old = self._empty_kline_df()
+        old = self._normalize_dates(old)
+        new = self._normalize_dates(new_df)
+
+        combined = (
+            pd.concat([old, new], ignore_index=True)
+            .drop_duplicates(subset=["date"], keep="last")
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+        rows = self._atomic_write_csv(combined, csv_path)
+
+        # meta：beg 取合并后首行（= 全量最早日，历史不回退），last 取实际末日
+        # NOTE: combined["date"] 已规整为 "YYYY-MM-DD" 字符串，需用 replace 而非
+        # datetime 的 strftime，避免 AttributeError；输出保持 "YYYYMMDD" 字符串，
+        # 与 _covers / _incremental_window 的日期字典序比较约定一致。
+        dates = combined["date"].sort_values()
+        first_date = dates.iloc[0].replace("-", "") if len(dates) > 0 else None
+        last_date = dates.iloc[-1].replace("-", "") if len(dates) > 0 else None
+        meta_dict: dict[str, Any] = {
+            "beg": first_date,
+            "end": last_date,
+            "rows": rows,
+            "first": first_date,
+            "last": last_date,
+            "version": 2,
+            "source": source,
+        }
+        self._atomic_write_meta(meta_dict, meta_path)
+        return csv_path
 
     # ------------------------------------------------------------------
     # 公开方法

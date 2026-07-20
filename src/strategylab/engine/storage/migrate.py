@@ -117,11 +117,13 @@ def migrate_v1_to_v2(engine: Any) -> None:
             )
         conn.commit()
 
-    # 写版本（仅当当前版本 < 2）
+    # 写版本：单一当前版本行不变式——更新已有最新行，不新增行（N=2）
     with SessionLocal() as s:
         cur = s.query(SchemaVersion).order_by(SchemaVersion.id.desc()).first()
-        if cur is None or int(cur.version) < 2:
+        if cur is None:
             s.add(SchemaVersion(version=2))
+        elif int(cur.version) < 2:
+            cur.version = 2  # 更新已有行，不新增
         s.commit()
 
 
@@ -157,9 +159,36 @@ def migrate_v2_to_v3(engine: Any) -> None:
         )
         conn.commit()
 
-    # 写版本 3
+    # 写版本 3：单一当前版本行不变式——更新已有最新行，不新增行（N=3）
     with SessionLocal() as s:
         cur = s.query(SchemaVersion).order_by(SchemaVersion.id.desc()).first()
-        if cur is None or int(cur.version) < 3:
+        if cur is None:
             s.add(SchemaVersion(version=3))
+        elif int(cur.version) < 3:
+            cur.version = 3  # 更新已有行，不新增
         s.commit()
+
+
+def migrate_v3_to_v4(engine: Any) -> None:
+    """v3 → v4 迁移（幂等）：``batches`` 表加 ``batch_type`` 列（data/backtest 隔离）。
+
+    仅 ALTER 加列（NOT NULL DEFAULT 'backtest'），不新增 schema_version 行，
+    以兼容既有 v1→v2→v3 迁移链与已有版本断言（保持与现有迁移链一致）。
+
+    FR-37：回测批次与「更新数据源」批次共用 ``batches`` 表，用 ``batch_type``
+    区分（``'backtest'`` / ``'data'``），清空回测结果时限定该维度避免误删 data 批次。
+    """
+    insp = inspect(engine)
+    if not insp.has_table("batches"):
+        return
+    columns = [c["name"] for c in insp.get_columns("batches")]
+    if "batch_type" in columns:
+        return  # 已存在（如全新库由 create_all 建出）→ 幂等跳过
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE batches ADD COLUMN batch_type VARCHAR(16) "
+                "NOT NULL DEFAULT 'backtest'"
+            )
+        )
+        conn.commit()

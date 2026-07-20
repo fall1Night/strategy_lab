@@ -249,3 +249,59 @@
 - `docs/技术文档.md`：§5.1 注册表描述改为自动发现；§9.3 toml `type` 注释改为"唯一、自动发现建表"；§13.2 新增策略步骤同步移除手工登记、补充 `describe()` 与冲突报错提示；模块表 `__init__.py` 一行改为 `discover_strategies()`。
 - `docs/strategy-maintenance-review.md`：补充「实施状态」——M1+M2 已于本次会话实施完成（工程师 IS_PASS: YES，QA 独立回归 35/35 NoOne），M3（toml `notes` 纯配置变体）保持待定。
 - 配套评审与设计文档：`docs/strategy-maintenance-review.md`（架构评审 + 增量迁移路线 M1→M2→M3）。
+
+---
+
+## 十、2026-07-20 3.0 大更新（拆分预热 + 增量更新数据源）— 已实现（待 QA）（2026-07-20）
+
+> 核心理念：**职责解耦（取数 vs 回测）+ 增量更新（append 而非覆盖）+ 时效可控**。
+> 用户诉求：把 v2.0「全市场预热」按钮耦合的「取行情」「跑回测」拆成两个独立按钮；取数从「整文件覆盖、全量重拉」改为「基于缓存 CSV 的增量追加」。
+> 铁律：不引入 Redis/Celery；仅用 Python 标准库 + 现有 MySQL/SQLite；复用 v2.0 `batches`/`batch_items` 全套机制。
+> 详细设计见 `docs/v3.0-design.md`（含类图 `v3.0-class-diagram.mermaid` 与时序图 `v3.0-sequence-diagram.mermaid`）。
+
+### 36. 拆分"全市场预热"为「更新数据源」+「回测」双按钮（FR-37）
+- `/production` 页去掉单一"全市场预热"按钮，改为「更新数据源」与「回测」两个独立操作；两者各自支持三种范围（板块 / 自定义池 / 全市场，全市场由范围单选 `all_market` 提供，不再有独立预热按钮）。
+- 点击「更新数据源」不触发任何回测逻辑；点击「回测」不触发任何取数（除非行情缺失报错）。
+- 进度区 / 2s 轮询 / 取消 / 板块总览 / 历史批次全部复用 v2.0 机制。
+
+### 37. 更新数据源独立取数、不回测（FR-38）
+- 新增 `POST /api/data/update`（data-only 批次）：仅从数据源（默认 akshare 新浪源 `stock_zh_a_daily`）拉取/维护日线+周线行情写 `data/` 缓存 CSV + `<prefix>_<source>_<period>_meta.json`；不跑回测、不落库 `backtest_runs`。
+- 复用 `batches`/`batch_items` 表（新增 `batch_type='data'` 字段区分），进度 / 取消 / 板块总览 / 重启-interrupted 全套机制复用，不新建表。
+
+### 38. 增量更新核心（FR-39）
+- `KlineCache` 新增 `merge()`（读旧 CSV → 按 `date` 合并去重 `keep='last'` → 排序 → `os.replace` 原子写回，历史 `beg` 不丢）+ `_incremental_window(meta, today, default_beg)`（基于 `meta.last` 计算取数起点 `last+1`，`last>=today` 则跳过）。
+- `provider.ensure_data` 新增 `mode='update'`：取数区间从「全量 `[start-1年, 今天]`」改为「`[last+1, 今天]`」，日线/周线各自独立增量；`save()` 由整文件覆盖改为 merge 写回。
+- 幂等（重复触发无新交易日则零追加）与续传（中断未写回则 `meta.last` 不变、下次从末日继续）天然成立。
+
+### 39. 回测独立、不复用取数职责（FR-40）
+- `ensure_data` 新增 `mode='verify'`：仅校验缓存覆盖所需区间，缺失即抛 `DataMissingError`，回测 `batch_item` 标记 `failed` 并提示"行情缺失，请先点『更新数据源』"，绝不静默全量重拉。
+- `backtest.run_symbol` 改为 `ensure_data(mode='verify')`；命中复用（`find_existing_runs`，不比对日期区间）仅用于"回测结果复用"，数据刷新改由独立「更新数据源」负责，结构上解耦。
+- 不改 `find_existing_runs`；`POST /api/batch/warmup-all` 保留，语义澄清为"全市场回测"（等同 all_market 回测按钮，不复用取数职责）。
+
+### 40. 数据时效提示增强（FR-41，P1）
+- 分析页对 `backtest_runs.end` 距今超过 `STALE_DAYS`（默认 30，可配 `STRATEGALAB_STALE_DAYS`，复用 FR-31 阈值）的 run 标注"数据较旧，建议点「更新数据源」刷新行情后再重跑"。
+- 细化/替代 FR-31 文案，明确引导至新增「更新数据源」按钮；`STALE_DAYS` 抽为单一常量，FR-31 与 FR-41 共用。
+
+### 41. 回测清空后全量重生成（FR-42，P0）
+- 用户诉求：「回测」按钮拆分出来后，要求先清理该策略之前产生的所有回测信息，再按现有数据源数据重新生成一份。
+- 触发语义：`POST /api/batch`（回测按钮）执行时，**先删除该策略（按 `strategy_name + params_hash + data_source` 维度）此前产生的全部 `backtest_runs` 历史结果**（含关联 `equity_points` / `trades` / `summary` / `batch_items` / `batches`），**再基于现有缓存行情（`verify` 模式，绝不重新取数）重新跑一遍所选范围的回测**，生成一份全新的、干净的结果集。
+- 清空口径（已决议，按推荐）：按 `strategy_name + params_hash + data_source` **清空该策略全部历史结果（不限所选范围）**；"重新生成的一份"仅覆盖本次所选范围；历史仅保留最新一份（清空后重跑覆盖），不保留 N 份快照。
+- 关联表与隔离：`batches` / `batch_items` 为 data/backtest 共用表，清空时**限定 `batch_type='backtest'` 且匹配上述维度**，避免误删「更新数据源」写入的 data 批次；缓存 CSV 完全不受影响。
+- **取代 FR-40 的"命中复用跳过"语义**：FR-42 移除回测主链路 `submit_batch` 对 `find_existing_runs` 的命中跳过；**保留 FR-40 的"verify 模式缺数据报错"**（`DataMissingError` → `failed` + "请先点『更新数据源』"）。
+- 实现落点：新增 `Repository.clear_strategy_runs(strategy_name, params_hash, data_source)`（事务内顺序 DELETE），`BatchRunner.submit_batch` 在 `create_batch` 之前调用它；详细设计见 `docs/v3.0-design.md` §2（决策 #8 修订 / #11）/ §3.4 / §7.2 / §8（T-42）/ §9 / §11。
+
+### 42. 分析查询列表新增「最近买入日期」列（FR-43，P0）
+- 用户诉求：分析查询页（`/analysis`）查询列表新增一列「最近买入日期」，为该列表**每行**对应回测结果产生的 `trades` 中"建仓/买入时间"的**最大值**（最近一次买入日期），并支持正序/倒序排序。
+- **字段来源（代码查证）**：trades 表"买入/建仓时间"真实字段名 = `entry_date`（`src/strategylab/engine/storage/schema.py:99`）；trades 仅 A 股多头（`side='long'` 固定，无 buy/sell 之分），故 `last_buy_date = MAX(trades.entry_date)`，**无需 side 过滤**；无 trades 的 run → `NULL` → 前端显示"—"。
+- **行粒度（代码查证）**：`rank_runs` 查询单元为 `BacktestRun`，按 `symbol` 去重仅保留最新一条（`repository.py:736-743`），故列表**每行 = 一个 symbol 的最新 run**，与 FR-43 推荐"按每行 run 取各自 trades 最大买入日期"一致，直接采用。
+- **取数方式**：在 `repository.rank_runs` 中用**一条分组 MAX 聚合**（`func.max(Trade.entry_date)` 按 `run_id`）算 `last_buy_date` 随行返回，避免逐 run 查 trades 的 N+1；返回 ISO `YYYY-MM-DD` 字符串，无 trades 为 `null`；`summary` 表无建仓字段，故**不冗余存储**，仅随行聚合。
+- **排序**：`rank_runs` 的 `sort_by` 白名单（`_ALLOWED_SORT`）新增 `last_buy_date`；升序=正序、降序=倒序，`null` 统一排末尾（沿用 FR-20 的 None 末位规则），切换排序后回第 1 页（沿用 FR-21 翻页守卫）；前端 `build_analysis_html` 列头 `cols` 新增 `['last_buy_date','最近买入日期',true]`，点击在 asc/desc 间切换、金色 ▲/▼ 高亮。
+- 实现落点：`engine/storage/repository.py`（`rank_runs` 聚合 + 白名单扩展）+ `web.py`（`build_analysis_html` 新增列与列头排序、空值"—"）；详细设计见 `docs/v3.0-design.md` §3.5 / §5（`/api/rank`）/ §8（T-43）/ §9 / §11。
+
+### 文档同步（3.0）
+- 新建 `docs/v3.0-design.md`：3.0 完整增量设计 + 实现计划（升级背景、已确认决策、增量核心、类图、API、前端双按钮、时序图、任务清单、文件清单、依赖、共享知识、风险、待明确事项）。
+- 配套 mermaid：`docs/v3.0-class-diagram.mermaid`、`docs/v3.0-sequence-diagram.mermaid`。
+- 本文件追加「十、3.0 大更新」章节。
+- `docs/需求文档.md` §11：FR-37~41（3.0 增量 PRD，已写好）。
+- `docs/使用指南.md` §10.5.2：数据生产页双按钮操作说明 + FR-41 时效提示。
+- `docs/技术文档.md`：同步 v3.0 架构扩展（数据模型 / 增量更新 / 双按钮 API / verify 模式）。
