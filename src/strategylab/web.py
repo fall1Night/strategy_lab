@@ -1321,6 +1321,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             self._send_html(build_form_html())
+        elif path == "/run":
+            self._send_html(build_form_html())
         elif path == "/production":
             self._send_html(build_production_html())
         elif path == "/analysis":
