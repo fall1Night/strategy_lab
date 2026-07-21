@@ -747,9 +747,12 @@ def rank_runs(
     - ``scope``：板块 code（按该板块聚合过滤）或 None/空（全部已跑过的）。
     - ``symbols``：自定义池 symbols（与 scope 互斥，优先于 scope）。
     - ``sort_by``：排序字段白名单 ``symbol_name`` / ``total_return_pct`` /
-      ``max_drawdown_pct`` / ``sharpe`` / ``win_rate_pct``；为 None 或非法值时
+      ``max_drawdown_pct`` / ``sharpe`` / ``win_rate_pct`` / ``last_buy_date``，
+      支持逗号分隔的多键组合排序（如 ``"last_buy_date,win_rate_pct"``，最多 3 个，
+      从左到右优先级递减）；``order`` 同步为逗号分隔的方向。为 None、空或全非法时
       保持默认排序（total_return_pct 降序，向后兼容）。
-    - ``order``：``"asc"`` 升序 / ``"desc"`` 降序；字段值为 None 的统一排到最后。
+    - ``order``：方向，逗号分隔且与 ``sort_by`` 平行（``"asc"`` 升序 /
+      ``"desc"`` 降序）；字段值为 None 的统一排到最后。
     - 返回 ``{items, total, miss_count}``；``miss_count`` 仅当 scope 为板块 code 时有效。
     """
     init_db()
@@ -838,7 +841,7 @@ def rank_runs(
                 seen[sym] = item
         items = list(seen.values())
 
-        # 排序（在去重后的 items 上做，None 统一排末尾，最小改动且可靠）
+        # 排序（在去重后的 items 上做，支持多键组合排序；None 统一排末尾）
         _ALLOWED_SORT = {
             "symbol_name",
             "total_return_pct",
@@ -847,15 +850,38 @@ def rank_runs(
             "win_rate_pct",
             "last_buy_date",  # FR-43：最近买入日期（NULL 统一排末尾，沿用 FR-20 规则）
         }
-        if sort_by in _ALLOWED_SORT:
-            _reverse = order == "desc"
-            _body = [x for x in items if x.get(sort_by) is not None]
-            _nils = [x for x in items if x.get(sort_by) is None]
-            _body.sort(key=lambda x: x[sort_by], reverse=_reverse)
-            items = _body + _nils
-        else:
-            # 默认行为：按总收益率降序（保持向后兼容）
-            items = sorted(items, key=lambda x: x["total_return_pct"] or 0, reverse=True)
+
+        # 解析多键排序规则：sort_by 逗号分隔取前 3 个，order 平行逗号分隔（不足默认 desc）
+        _keys = [k.strip() for k in (sort_by or "").split(",")][:3] if sort_by else []
+        _dirs = [d.strip() for d in order.split(",")]
+        _rules: list[tuple[str, bool]] = []
+        for _i, _key in enumerate(_keys):
+            if _key not in _ALLOWED_SORT:
+                continue
+            _d = _dirs[_i] if _i < len(_dirs) else "desc"
+            _rules.append((_key, _d == "desc"))
+        if not _rules:
+            # 单键非法 / 空 → 默认总收益率降序（保持向后兼容）
+            _rules = [("total_return_pct", True)]
+
+        # 多键稳定排序：
+        # 1) 先取出「主键缺失」的行，保留原始查询顺序，最后统一附加到末尾
+        #    （保证"主键缺失=末尾且不被次级键重排"，符合 FR-20/FR-43 设计）；
+        # 2) 对剩余行按规则「逆序」逐个稳定排序——最低优先级先排、最高优先级(主键)最后排，
+        #    靠 Python 稳定排序保住高优先级键的相对顺序，次级键仅在"高优先级相等"时破平。
+        _primary_key = _rules[0][0]
+        _null_primary: list[dict[str, Any]] = [x for x in items if x.get(_primary_key) is None]
+        _pool: list[dict[str, Any]] = [x for x in items if x.get(_primary_key) is not None]
+
+        head: list[dict[str, Any]] = list(_pool)
+        tail: list[dict[str, Any]] = []  # 仅承载「次级键缺失」的行
+        for _key, _rev in reversed(_rules):
+            body = [x for x in head if x.get(_key) is not None]
+            nils = [x for x in head if x.get(_key) is None]
+            body.sort(key=lambda x: x[_key], reverse=_rev)
+            head = body
+            tail = nils + tail
+        items = head + tail + _null_primary
 
         # 清理辅助字段
         for item in items:

@@ -848,6 +848,18 @@ def build_analysis_html() -> str:
   .pager { display:flex; gap:12px; align-items:center; margin-top:14px; }
   .empty { color:#64748b; font-size:13px; padding:20px 0; text-align:center; }
   code { background:#0f172a; padding:1px 6px; border-radius:5px; color:#93c5fd; font-size:12px; }
+  .sort-panel { position:fixed; right:24px; top:96px; width:340px; background:#1e293b;
+          border:1px solid #334155; border-radius:14px; padding:18px; z-index:50;
+          box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  .sort-panel h3 { margin:0 0 12px; font-size:15px; color:#e2e8f0; }
+  .sort-rule { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+  .sort-rule select { width:auto; flex:1; padding:8px 10px; margin-top:0; }
+  .sort-rule .pri { width:16px; color:#fbbf24; font-weight:700; font-size:12px; text-align:center; }
+  .sort-rule .move { width:30px; padding:6px 0; margin-top:0; text-align:center; background:#334155; font-weight:500; }
+  .sort-rule .del { width:30px; padding:6px 0; margin-top:0; text-align:center; background:#7f1d1d; font-weight:500; }
+  .sort-actions { display:flex; gap:8px; margin-top:12px; }
+  .sort-actions button { margin-top:0; flex:1; }
+  button.addkey { width:100%; background:#334155; font-weight:500; margin-top:8px; }
 __NAV_CSS__</style>
 </head>
 <body>
@@ -869,6 +881,18 @@ __SCOPE_OPTS__
     <textarea id="pool-symbols" rows="3" placeholder="600216.SH, 000001.SZ"></textarea>
     <button type="button" onclick="loadRank(1)">查询排名</button>
     <button type="button" class="ghost" onclick="exportCsv()">⬇ 导出 CSV</button>
+    <button type="button" class="ghost" onclick="toggleSortPanel()">⚙ 排序</button>
+  </div>
+
+  <div id="sort-panel" class="sort-panel" style="display:none;">
+    <h3>⚙ 组合排序（最多 3 个键）</h3>
+    <div id="sort-rules"></div>
+    <button type="button" class="addkey" id="add-sort-key" onclick="addSortKey()">＋ 添加排序键</button>
+    <div class="sort-actions">
+      <button type="button" onclick="applySort()">应用</button>
+      <button type="button" class="ghost" onclick="resetSort()">重置</button>
+      <button type="button" class="ghost" onclick="cancelSort()">取消</button>
+    </div>
   </div>
 
   <div class="card">
@@ -879,7 +903,94 @@ __SCOPE_OPTS__
 </div>
 <script>
 var curStrategy='', curScope='', curSymbols='';
-var curSortBy='total_return_pct', curSortDir='desc';
+// —— 组合排序（多键排序）核心状态：curSortRules 为 [{key,dir}, ...]，最多 3 条 ——
+var SORT_FIELDS=[['symbol_name','股票名称'],['total_return_pct','总收益率'],['max_drawdown_pct','最大回撤'],['sharpe','夏普'],['win_rate_pct','胜率'],['last_buy_date','最近买入日期']];
+var SORT_WHITELIST={'symbol_name':1,'total_return_pct':1,'max_drawdown_pct':1,'sharpe':1,'win_rate_pct':1,'last_buy_date':1};
+var DEFAULT_SORT_RULES=[{key:'total_return_pct', dir:'desc'}];
+var SORT_STORAGE_KEY='strategylab.rankSort.v1';
+
+// 从 localStorage 读取持久化的排序组合；校验非法/越界则回退默认
+function loadSortRules(){
+  try{
+    var raw=localStorage.getItem(SORT_STORAGE_KEY);
+    if(!raw) return DEFAULT_SORT_RULES.slice();
+    var arr=JSON.parse(raw);
+    if(!Array.isArray(arr)) return DEFAULT_SORT_RULES.slice();
+    var out=[];
+    for(var i=0;i<arr.length && out.length<3;i++){
+      var r=arr[i];
+      if(r && SORT_WHITELIST[r.key] && (r.dir==='asc'||r.dir==='desc')){
+        out.push({key:r.key, dir:r.dir});
+      }
+    }
+    if(out.length<1 || out.length>3) return DEFAULT_SORT_RULES.slice();
+    return out;
+  }catch(e){ return DEFAULT_SORT_RULES.slice(); }
+}
+function saveSortRules(){
+  try{ localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(curSortRules)); }catch(e){}
+}
+var curSortRules=loadSortRules();
+
+// —— 排序面板：用 panelRules 作为面板内工作副本，apply 时才写入 curSortRules ——
+var panelRules=[];
+function toggleSortPanel(){
+  var p=document.getElementById('sort-panel');
+  if(p.style.display==='none' || !p.style.display){ openSortPanel(); } else { p.style.display='none'; }
+}
+function openSortPanel(){
+  panelRules=curSortRules.map(function(r){ return {key:r.key, dir:r.dir}; });
+  renderSortRules();
+  document.getElementById('sort-panel').style.display='block';
+}
+function cancelSort(){ document.getElementById('sort-panel').style.display='none'; }
+function applySort(){
+  if(panelRules.length<1) panelRules=DEFAULT_SORT_RULES.slice();
+  curSortRules=panelRules.slice(); saveSortRules();
+  document.getElementById('sort-panel').style.display='none'; loadRank(1);
+}
+function resetSort(){
+  curSortRules=DEFAULT_SORT_RULES.slice(); saveSortRules();
+  document.getElementById('sort-panel').style.display='none'; loadRank(1);
+}
+function addSortKey(){
+  if(panelRules.length>=3) return;
+  var used={}; for(var i=0;i<panelRules.length;i++) used[panelRules[i].key]=1;
+  var nk='symbol_name';
+  for(var j=0;j<SORT_FIELDS.length;j++){ if(!used[SORT_FIELDS[j][0]]){ nk=SORT_FIELDS[j][0]; break; } }
+  panelRules.push({key:nk, dir:(nk==='symbol_name'?'asc':'desc')});
+  renderSortRules();
+}
+function moveSortKey(idx, delta){
+  var ni=idx+delta; if(ni<0 || ni>=panelRules.length) return;
+  var t=panelRules[idx]; panelRules[idx]=panelRules[ni]; panelRules[ni]=t;
+  renderSortRules();
+}
+function delSortKey(idx){ panelRules.splice(idx,1); renderSortRules(); }
+function renderSortRules(){
+  var box=document.getElementById('sort-rules');
+  if(!panelRules.length){
+    box.innerHTML='<div class="hint">暂无排序键，点击下方按钮添加。</div>';
+  } else {
+    box.innerHTML=panelRules.map(function(r,i){
+      var optF=SORT_FIELDS.map(function(f){ return '<option value="'+f[0]+'"'+(f[0]===r.key?' selected':'')+'>'+f[1]+'</option>'; }).join('');
+      var optD='<option value="desc"'+(r.dir==='desc'?' selected':'')+'>降序 ▼</option>'
+              +'<option value="asc"'+(r.dir==='asc'?' selected':'')+'>升序 ▲</option>';
+      var upDisabled=(i===0)?'disabled':'';
+      var dnDisabled=(i===panelRules.length-1)?'disabled':'';
+      return '<div class="sort-rule">'
+        +'<span class="pri">'+(i+1)+'</span>'
+        +'<select onchange="panelRules['+i+'].key=this.value">'+optF+'</select>'
+        +'<select onchange="panelRules['+i+'].dir=this.value">'+optD+'</select>'
+        +'<button type="button" class="move" '+upDisabled+' onclick="moveSortKey('+i+',-1)">↑</button>'
+        +'<button type="button" class="move" '+dnDisabled+' onclick="moveSortKey('+i+',1)">↓</button>'
+        +'<button type="button" class="del" onclick="delSortKey('+i+')">✕</button>'
+        +'</div>';
+    }).join('');
+  }
+  var addBtn=document.getElementById('add-sort-key');
+  if(addBtn) addBtn.disabled=(panelRules.length>=3);
+}
 function loadRank(page){
   if(page==null||isNaN(page)||page<1) page=1;
   curStrategy=document.getElementById('strategy').value;
@@ -887,7 +998,8 @@ function loadRank(page){
   curSymbols=document.getElementById('pool-symbols').value.trim();
   var qs='strategy='+encodeURIComponent(curStrategy)
     +'&page='+page+'&size=50'
-    +'&sort_by='+encodeURIComponent(curSortBy)+'&order='+encodeURIComponent(curSortDir);
+    +'&sort_by='+encodeURIComponent(curSortRules.map(function(r){return r.key;}).join(','))
+    +'&order='+encodeURIComponent(curSortRules.map(function(r){return r.dir;}).join(','));
   if(curScope) qs+='&scope='+encodeURIComponent(curScope);
   if(curSymbols) qs+='&symbols='+encodeURIComponent(curSymbols);
   fetch('/api/rank?'+qs).then(function(r){return r.json();}).then(function(d){
@@ -917,17 +1029,26 @@ function loadRank(page){
   }).catch(function(){ document.getElementById('rank-table').innerHTML='<div class="empty">加载失败</div>'; });
 }
 function sortBy(col){
-  if(col===curSortBy){ curSortDir=(curSortDir==='desc'?'asc':'desc'); }
-  else { curSortBy=col; curSortDir=(col==='symbol_name'?'asc':'desc'); }
+  // 便捷单键排序（向后兼容）：与当前唯一规则相同则翻转方向；否则以该列重置为唯一规则
+  if(curSortRules.length===1 && curSortRules[0].key===col){
+    curSortRules[0].dir=(curSortRules[0].dir==='desc'?'asc':'desc');
+  } else {
+    curSortRules=[{key:col, dir:(col==='symbol_name'?'asc':'desc')}];
+  }
+  saveSortRules();
   loadRank(1);
 }
 function headerHtml(){
   var cols=[['symbol_name','股票名称',true],['total_return_pct','总收益率',true],['max_drawdown_pct','最大回撤',true],['sharpe','夏普',true],['win_rate_pct','胜率',true],['last_buy_date','最近买入日期',true],['','数据时效',false]];
+  // 构建 key -> {priority, dir} 索引，用于在表头标注组合排序优先级
+  var sortIdx={};
+  for(var i=0;i<curSortRules.length;i++){ sortIdx[curSortRules[i].key]={pri:i+1, dir:curSortRules[i].dir}; }
   return '<tr>'+cols.map(function(c){
     var key=c[0], label=c[1], sortable=c[2];
     if(!sortable) return '<th>'+label+'</th>';
-    var ind=(key===curSortBy)?(curSortDir==='asc'?' ▲':' ▼'):'';
-    var cls=' class="sortable'+(key===curSortBy?' sorted':'')+'"';
+    var info=sortIdx[key];
+    var ind=info?(' '+info.pri+(info.dir==='asc'?'▲':'▼')):'';
+    var cls=' class="sortable'+(info?' sorted':'')+'"';
     return '<th'+cls+' data-col="'+key+'" onclick="sortBy(this.dataset.col)">'+label+ind+'</th>';
   }).join('')+'</tr>';
 }
@@ -944,7 +1065,8 @@ function rowHtml(it){
 function openRun(rid){ window.open('/history?run_id='+rid); }
 function exportCsv(){
   var qs='strategy='+encodeURIComponent(curStrategy)+'&export=csv'
-    +'&sort_by='+encodeURIComponent(curSortBy)+'&order='+encodeURIComponent(curSortDir);
+    +'&sort_by='+encodeURIComponent(curSortRules.map(function(r){return r.key;}).join(','))
+    +'&order='+encodeURIComponent(curSortRules.map(function(r){return r.dir;}).join(','));
   if(curScope) qs+='&scope='+encodeURIComponent(curScope);
   if(curSymbols) qs+='&symbols='+encodeURIComponent(curSymbols);
   window.open('/api/rank?'+qs);
@@ -1075,8 +1197,13 @@ class Handler(BaseHTTPRequestHandler):
         ph = (params.get("params_hash", [""])[0] or "").strip() or None
         export = (params.get("export", [""])[0] or "").strip()
         sort_by = (params.get("sort_by", [""])[0] or "").strip() or None
-        order_raw = (params.get("order", ["desc"])[0] or "desc").strip()
-        order = order_raw if order_raw in ("asc", "desc") else "desc"
+        order_raw = (params.get("order", ["desc"])[0] or "desc").strip() or "desc"
+        # 单键 order 仅允许 asc/desc；多键形如 "desc,asc"，逐 token 校验后透传，非法整体回退 "desc"
+        if "," in order_raw:
+            _order_tokens = [t.strip() for t in order_raw.split(",") if t.strip()]
+            order = ",".join(_order_tokens) if all(t in ("asc", "desc") for t in _order_tokens) else "desc"
+        else:
+            order = order_raw if order_raw in ("asc", "desc") else "desc"
         try:
             page = int((params.get("page", ["1"])[0] or "1"))
         except ValueError:

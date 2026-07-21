@@ -3,9 +3,11 @@
 ## 协作陷阱（重要）
 - **agent 框架偶发"假完成"**：spawn 的子 agent（工程师等）可能回"Task already completed / auto-approved shutdown"，但磁盘文件实际未改动（疑似框架瞬态错误）。**主理人必须在采信前亲自 Grep + Read 核验落盘**，不能轻信 agent 的完成宣告。对策：重派时附带精确 old_string + 强制要求 agent 用 Grep/Read 证明改动已写入。
 - **pytest 整文件跑极慢/卡住**：`tests/test_datasource.py` 整文件 pytest 常卡在网络/DB 类 fixture（疑似真实连接），前台易超时转后台且长时间无输出。亲自核验时：**只跑纯 mock 的测试文件（如 test_eastmoney_null_response.py）或用 python -c 单跑关键用例逻辑**，避免整文件 pytest；若要验证被改用例，直接复刻其 mock+断言逻辑用 python 跑，秒级出结果。
+- **TeamCreate 工具不可用**：本项目的软件团队 SOP 协作中，`TeamCreate`/`TeamDelete` 调用报 "Tool Not Found"。改用直接 `Agent` 派工（`name`=`subagent_type`=`software-engineer` / `software-qa-engineer` / `software-product-manager` / `software-architect`），实质 SOP 流转（主理人中转、成员独立产出、主理人亲自核验落盘）不变。
 
 ## 技术约定
 - 数据源切换：`.env` 的 `STRATEGALAB_DATA_SOURCE`（eastmoney/akshare/tushare/broker）。**"新浪数据源"= `akshare` 适配器**（底层 `stock_zh_a_daily`），代码里没有独立 `sina` 源名；因东财 IP 限流，当前默认 `akshare`。磁盘 CSV 按源前缀区分：`data/*_akshare_daily/weekly.csv` + `_meta.json`（标 `source: akshare`），旧 eastmoney 缓存为 `*_eastmoney_*`。
 - 批次元数据在 **MySQL**(`mysql+pymysql://root@localhost:3306/strategylab`)，本地 `strategy_lab.db` 是误导项（0字节）。
 - 回测区间不匹配坑：provider.py / batch_runner.py 的 genesis 起点(20220706)晚于 backtest 要求的 2019。已通过「双向补 + 回测自动补足」缓解；切到 akshare 后其 `stock_zh_a_daily` 直接返回 2019+ 全量历史，该坑实际已不再触发（genesis 常量本身未改，但不再导致"行情缺失"）。
 - 受管 Python（关键）：**必须用 venv** `C:\Users\Administrator\.workbuddy\binaries\python\envs\default\Scripts\python.exe`（同时装了 `strategylab`(editable, 指向 src) + `akshare 1.18.64` + numpy/pandas/pytest）。基础解释器 `versions/3.13.12/python.exe` **缺 strategylab 模块**，运行/服务/测试用它会 ModuleNotFoundError。
+- **多键组合排序正确姿势（重要）**：`repository.rank_runs` 做多键稳定排序时，必须从**最低优先级往最高优先级**排（循环 `reversed(_rules)`），靠 Python 稳定排序保住高优先级键顺序，次级键仅在"高优先级相等"时破平。**禁止**按优先级正序排（会让次级键主导全局）。且排序前须先取出"主键缺失"行（`null_primary=[x for x in items if x.get(primary_key) is None]`）保留查询序、最后 `items=head+tail+_null_primary` 附加，否则缺失行会被次级键重排（违背 FR-20/FR-43"主键缺失行保持查询序"设计）。白名单 `_ALLOWED_SORT` 含 `last_buy_date` 等；最多取前 3 键。
