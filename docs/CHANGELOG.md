@@ -305,3 +305,21 @@
 - `docs/需求文档.md` §11：FR-37~41（3.0 增量 PRD，已写好）。
 - `docs/使用指南.md` §10.5.2：数据生产页双按钮操作说明 + FR-41 时效提示。
 - `docs/技术文档.md`：同步 v3.0 架构扩展（数据模型 / 增量更新 / 双按钮 API / verify 模式）。
+
+---
+
+## 十一、2026-07-20 4.0 新策略：日线KDJ监控 + MACD金叉买入（架构设计交付）（高见远）
+
+### 43. 4.0 新策略架构设计（REQ-01~09，零中心改动）
+- **策略类** `KdjMacdCross`（`type="kdj_macd_cross"`）：`src/strategylab/engine/strategies/kdj_macd_cross.py` 新建；配套 `src/strategylab/resources/strategies/kdj_macd_cross.toml`（`type` 匹配）。
+- **零中心改动上线**：`strategies/__init__.py` 自动扫描注册 + `config.py` 自动加载 toml → 前端下拉与 CLI `list-strategies` 自动可见（REQ-07），不改任何 UI/CLI/注册中心代码。
+- **唯一必要既有文件改动**：`engine/indicators.py` 的 `compute_kdj` 增加向后兼容可选参数 `return_full=False`（默认返回 J `Series` 不变；`True` 返回含 K/D/J 的 `DataFrame`），以解决"KDJ 金叉=K 上穿 D"需 K/D 列而原实现只回传 J 的问题（REQ-09 复用、不破坏范例）。
+- **逻辑**：日线 KDJ 金叉（K 上穿 D）→ 监控态 armed；armed 下日线 MACD 金叉（DIF 上穿 DEA，任意位置）当日收盘买入 `buy_amount=100000` 整手；持仓回撤≥`drawdown_threshold=0.05`（相对买入成交价=买入日收盘，纯价格口径）或 MACD 任意死叉（DIF 下穿 DEA）当日收盘清仓；清仓后解除 armed 可再循环；同一时间仅持一笔底仓。
+- **费用/持仓模板对齐（REQ-06）**：新类**复制**范例 `_fee_cost`/`_fee_proceeds`/`_close_base`/`_build_positions`（不 import、不抽基类），`trade_history`/`positions` 字段结构逐字一致。
+- **执行价偏差声明**：买入/清仓=当日收盘价（`execution="same_day_close"`），含 look-ahead 偏差，由 `describe()` 显式声明（沿用范例）。
+- **任务分解**：T1 指标增强 → T2 骨架/参数 → T3 买入 → T4 清仓 → T5 再循环/强平 → T6 toml → T7 费用/positions 对齐 → T8 自检/偏差声明（共 8 任务）。无新增依赖（仅 numpy/pandas/tomllib）。
+
+文档同步（4.0 设计）
+- 新建 `docs/v4.0-design.md`：4.0 完整架构设计 + 任务分解（实现方案 / 文件清单 / 类图 / 时序图 / 任务列表 / 依赖 / 共享知识 / 6 个待确认问题逐条拍板）。
+- 配套 mermaid：`docs/v4.0-class-diagram.mermaid`、`docs/v4.0-sequence-diagram.mermaid`。
+- 本文件追加「十一、4.0 新策略」章节。

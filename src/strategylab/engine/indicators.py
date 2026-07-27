@@ -16,12 +16,17 @@ def compute_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int =
     return dif, dea, hist
 
 
-def compute_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3, m2: int = 3) -> pd.Series:
+def compute_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3, m2: int = 3, return_full: bool = False):
     """标准 KDJ, 初始 K=D=50。
 
     RSV=(C-Ln)/(Hn-Ln)*100; K=(m1-1)/m1*K_prev+1/m1*RSV;
     D=(m2-1)/m2*D_prev+1/m2*K; J=3K-2D。
     RSV 为 NaN 时 K/D 维持上一值(初始 50)。
+
+    参数 return_full：
+      - False（默认）：仅返回 J 列（pd.Series），与历史调用行为完全一致、向后兼容；
+      - True：返回含 K/D/J 三列的 pd.DataFrame，供金叉/死叉判定使用。
+    J 的计算逻辑与数值在两种模式下均不变。
     """
     length = len(df)
     low_n = df["low"].rolling(n).min()
@@ -41,4 +46,12 @@ def compute_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3, m2: int = 3) -> pd.Se
                 k[i] = (m1 - 1) / m1 * k[i - 1] + (1 / m1) * rsv_vals[i]
                 d[i] = (m2 - 1) / m2 * d[i - 1] + (1 / m2) * k[i]
     j = 3.0 * k - 2.0 * d
+    if return_full:
+        return pd.DataFrame(
+            {
+                "K": pd.Series(k, index=df.index),
+                "D": pd.Series(d, index=df.index),
+                "J": pd.Series(j, index=df.index),
+            }
+        )
     return pd.Series(j, index=df.index)

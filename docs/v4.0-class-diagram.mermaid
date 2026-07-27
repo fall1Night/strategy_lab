@@ -1,0 +1,33 @@
+classDiagram
+    direction TB
+
+    class BaseStrategy {
+        <<abstract>>
+        +str type
+        +dict cfg
+        +dict params
+        +__init__(cfg: dict)
+        +run(daily, weekly, start, end, symbol, symbol_name) dict
+    }
+
+    class KdjMacdCross {
+        +str type = "kdj_macd_cross"
+        -float commission
+        -float stamp_tax
+        -int lot_size
+        -float initial_cash
+        -float buy_amount
+        -float drawdown_threshold
+        -str symbol
+        -str symbol_name
+        -dict macd_p
+        -dict kdj_p
+        +describe(params: dict) str
+        -_fee_cost(size: int, price: float) float
+        -_fee_proceeds(size: int, price: float) float
+        -_close_base(base_trade, exit_price, exit_date, exit_bar, trade_history, label) float
+        -_build_positions(trade_history: list) list
+        +run(daily, weekly, start, end, symbol, symbol_name) dict
+    }
+
+    BaseStrategy <|-- KdjMacdCross

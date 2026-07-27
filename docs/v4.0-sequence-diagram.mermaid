@@ -1,0 +1,49 @@
+sequenceDiagram
+    participant BE as backtest.run_symbol
+    participant S as KdjMacdCross
+    participant IND as indicators
+    participant DF as daily DataFrame
+
+    BE->>S: get_strategy_class("kdj_macd_cross") → cls(cfg)
+    BE->>S: strat.run(daily, weekly, start, end, symbol, name)
+
+    S->>IND: compute_macd(daily.close, fast, slow, signal)
+    IND-->>S: (dif, dea, hist)
+    S->>IND: compute_kdj(daily, n, m1, m2, return_full=True)
+    IND-->>S: DataFrame{K, D, J}
+
+    S->>DF: 加列 dif/dea/hist/K/D/J
+    S->>DF: 派生布尔列
+    Note over DF: kdj_gold  = (K-D)前日<=0 且 当日>0   （K 上穿 D）
+    Note over DF: macd_gold = (DIF-DEA)前日<=0 且 当日>0（DIF 上穿 DEA，任意位置）
+    Note over DF: macd_death= (DIF-DEA)前日>=0 且 当日<0（DIF 下穿 DEA，任意位置）
+
+    loop 评估区间内每个交易日 bar i（date∈[start,end]）
+        alt 持仓中（base_shares>0）
+            S->>S: 回撤? close <= entry_price*(1-drawdown_threshold)
+            S->>S: 死叉? macd_death[i]
+            alt 回撤≥阈值 或 MACD 死叉（清仓最高优先级）
+                S->>S: _close_base(退出价=当日close, label="底仓清仓")
+                Note over S: trade_history 追加 role="底仓"
+                S->>S: base_shares=0; base_trade=None; armed=False
+            else 继续持有
+                S->>S: 维持底仓
+            end
+            S->>S: equity_curve.append(cash + base_shares*close)
+        else 空仓（base_shares==0）
+            opt kdj_gold（K 上穿 D）
+                S->>S: armed = True   （监控态建立，REQ-01）
+            end
+            opt armed 且 macd_gold（DIF 上穿 DEA）
+                S->>S: size = 整手(buy_amount/close); cash -= _fee_cost(size, close)
+                Note over S: base_trade = {entry_price=close, size, entry_bar=i, position_id=pid++}
+                S->>S: armed = False   （买入后解除监控，REQ-02/05）
+            end
+            S->>S: equity_curve.append(cash + base_shares*close)
+        end
+    end
+
+    S->>S: 期末强平（末日 close）+ 底仓区间不重叠自检
+    S->>S: _build_positions(trade_history) → positions
+    S-->>BE: {equity_curve, trade_history, positions}
+    BE->>BE: export_results(write_files=False) + repository.save_run 落库
