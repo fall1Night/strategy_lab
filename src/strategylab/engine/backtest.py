@@ -107,27 +107,27 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
     else:
         sym_cfg.setdefault("symbol_name", sym_cfg["symbol"])
 
-    # 取数 warmup 区间：日线早 1 年、周线早约 1.5 年；结束取到 max(评估结束, 今天)
+    # 取数 warmup 区间：日线早 1 年、周线早约 1.5 年
+    # verify 仅校验缓存是否覆盖回测所需区间 [daily_beg, end]；
+    # 缓存末日落后于今天不触发重拉（仅当回测 end 超出缓存范围时才需补数据）。
+    # update 模式则取到 max(end, 今天)，确保补足后数据尽量新。
     start_ts = pd.Timestamp(start)
     end_ts = pd.Timestamp(end)
     today = pd.Timestamp.now().normalize()
     fetch_end = max(end_ts, today)
     daily_beg = (start_ts - pd.DateOffset(years=1)).strftime("%Y%m%d")
     weekly_beg = (start_ts - pd.DateOffset(years=1, months=6)).strftime("%Y%m%d")
-    # FR-40 修复：回测先仅校验缓存覆盖（verify）；若行情不足（warmup 历史缺失或
-    # 末日早于今天）则自动以 update 双向补（往前补历史 + 往后补到今天）后继续回测，
-    # 而非仅提示手动更新。若 update 仍失败（如网络彻底不可用）则保持 DataMissingError
-    # 上浮，由上层标记 failed —— 不改变既有"缺数即失败"的兜底语义。
+    end_str = end_ts.strftime("%Y%m%d")
     fetch_end_str = fetch_end.strftime("%Y%m%d")
     fetched = False
     try:
         daily_csv, weekly_csv = data_feed.ensure_data(
             sym_cfg, out_dir,
-            daily_beg=daily_beg, daily_end=fetch_end_str,
-            weekly_beg=weekly_beg, weekly_end=fetch_end_str,
+            daily_beg=daily_beg, daily_end=end_str,
+            weekly_beg=weekly_beg, weekly_end=end_str,
             mode="verify",
             required_beg=daily_beg,
-            required_end=fetch_end_str,
+            required_end=end_str,
         )
     except DataMissingError:
         fetched = True
