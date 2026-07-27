@@ -173,8 +173,8 @@ def submit_data_batch(
             prefix = normalize_symbol(sym)["prefix"]
             d_meta, *_ = prov._cache._read_any_meta(out_dir_p, prefix, eff, "daily")
             w_meta, *_ = prov._cache._read_any_meta(out_dir_p, prefix, eff, "weekly")
-            d_need = prov._cache._incremental_window(d_meta, today, "20220706") is not None
-            w_need = prov._cache._incremental_window(w_meta, today, "20211210") is not None
+            d_need = prov._cache._incremental_window(d_meta, today, "20200101") is not None
+            w_need = prov._cache._incremental_window(w_meta, today, "20200101") is not None
             if not d_need and not w_need:
                 latest_syms.add(sym)
     except Exception:  # noqa: BLE001

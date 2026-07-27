@@ -2,8 +2,8 @@
 """策略回测 CLI —— 输入策略 + 标的 + 日期，生成仪表盘。
 
 用法示例（包化后）：
-  strategylab --symbols 002001.SZ --start 2023-07-18 --end 2026-07-18
-  python -m strategylab --symbols 600216.SH 300765.SZ --start 2023-07-18 --end 2026-07-18
+  strategylab --symbols 002001.SZ --start 2020-01-01 --end 2026-07-28
+  python -m strategylab --symbols 600216.SH 300765.SZ --start 2020-01-01 --end 2026-07-28
   strategylab --list-strategies
   strategylab --list-runs
 

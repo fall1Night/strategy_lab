@@ -18,6 +18,75 @@ from .datasource.exceptions import DataMissingError
 from .strategies import get_strategy_class
 
 
+# ---------------------------------------------------------------------------
+# 日志辅助
+# ---------------------------------------------------------------------------
+def _read_meta_json(meta_path: Path) -> dict[str, Any] | None:
+    """读取缓存 meta JSON；不存在或损坏返回 None。"""
+    try:
+        if meta_path.exists():
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        pass
+    return None
+
+
+def _fmt_date_ymd(yyyymmdd: str) -> str:
+    """YYYYMMDD → YYYY.M.D（无前导零月/日，如 2020.1.1）。"""
+    if not yyyymmdd or len(yyyymmdd) < 8:
+        return yyyymmdd or "N/A"
+    y = yyyymmdd[:4]
+    m = str(int(yyyymmdd[4:6]))
+    d = str(int(yyyymmdd[6:8]))
+    return f"{y}.{m}.{d}"
+
+
+def _log_data_status(
+    symbol: str,
+    daily: pd.DataFrame,
+    weekly: pd.DataFrame,
+    daily_csv: Path,
+    weekly_csv: Path,
+    fetched: bool,
+) -> None:
+    """打印统一的增量取数状态日志。
+
+    从 meta 文件读取缓存行数与日期区间；meta 缺失时回退到 DataFrame。
+    """
+    daily_meta_path = daily_csv.parent / (daily_csv.stem + "_meta.json")
+    weekly_meta_path = weekly_csv.parent / (weekly_csv.stem + "_meta.json")
+    daily_meta = _read_meta_json(daily_meta_path)
+    weekly_meta = _read_meta_json(weekly_meta_path)
+
+    # 日线：优先 meta.rows，否则 DataFrame 实际行数
+    n_daily = daily_meta.get("rows") if daily_meta else None
+    if n_daily is None:
+        n_daily = len(daily)
+
+    # 周线
+    n_weekly = weekly_meta.get("rows") if weekly_meta else None
+    if n_weekly is None:
+        n_weekly = len(weekly)
+
+    # 日期区间：优先用 meta.beg/meta.end，缺失则取首末日期的自然格式
+    if daily_meta and daily_meta.get("beg") and daily_meta.get("end"):
+        range_beg = _fmt_date_ymd(str(daily_meta["beg"]))
+        range_end = _fmt_date_ymd(str(daily_meta["end"]))
+    elif len(daily) > 0:
+        range_beg = pd.Timestamp(daily["date"].iloc[0]).strftime("%Y.%-m.%-d")
+        range_end = pd.Timestamp(daily["date"].iloc[-1]).strftime("%Y.%-m.%-d")
+    else:
+        range_beg = range_end = "N/A"
+
+    fetch_label = "需要拉取" if fetched else "无需拉取"
+    print(
+        f"  [增量取数] {symbol}: "
+        f"日线 {n_daily} 条 / 周线 {n_weekly} 条，"
+        f"当前范围为{range_beg}-{range_end}，"
+        f"{fetch_label}，正在本地计算"
+    )
+
+
 def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
               start: str, end: str, out_dir: str | Path,
               batch_id: str | None = None,
@@ -50,6 +119,7 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
     # 而非仅提示手动更新。若 update 仍失败（如网络彻底不可用）则保持 DataMissingError
     # 上浮，由上层标记 failed —— 不改变既有"缺数即失败"的兜底语义。
     fetch_end_str = fetch_end.strftime("%Y%m%d")
+    fetched = False
     try:
         daily_csv, weekly_csv = data_feed.ensure_data(
             sym_cfg, out_dir,
@@ -60,6 +130,7 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
             required_end=fetch_end_str,
         )
     except DataMissingError:
+        fetched = True
         # 行情不足：自动补足（从 daily_beg/weekly_beg 起点双向补到今天）后再回测
         daily_csv, weekly_csv = data_feed.ensure_data(
             sym_cfg, out_dir,
@@ -69,6 +140,9 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
         )
     daily = data_feed.load_bars(daily_csv)
     weekly = data_feed.load_bars(weekly_csv)
+
+    # 统一日志：该标的的缓存状态 & 是否需要联网取数
+    _log_data_status(sym_cfg["symbol"], daily, weekly, daily_csv, weekly_csv, fetched)
 
     cls = get_strategy_class(strategy_cfg["type"])
     strat = cls(strategy_cfg)

@@ -352,7 +352,7 @@ function clearSectorSelections(){
         <div class="row">
           <div>
             <label for="start">评估起始日期</label>
-            <input type="date" id="start" name="start" value="2023-07-18">
+            <input type="date" id="start" name="start" value="2020-01-01">
           </div>
           <div>
             <label for="end">评估结束日期</label>
@@ -378,7 +378,7 @@ function clearSectorSelections(){
     <p class="foot">
       本服务复用本地回测引擎（周线MACD + 日线KDJ 双入口做T）。首次对某标的取数会联网拉取前复权行情并缓存，
       后续直接复用。<br>
-      命令行等效用法：<code>strategylab --symbols 600216.SH 300765.SZ --start 2023-07-18 --end {today}</code>
+      命令行等效用法：<code>strategylab --symbols 600216.SH 300765.SZ --start 2020-01-01 --end {today}</code>
     </p>
   </div>
   </div>
@@ -1495,7 +1495,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("标的代码包含中文，请通过搜索框或板块面板重新选股。提示：选中板块芯片后务必确认已点「运行回测」前页面刷新完毕。")
         names_raw = (data.get("names", [""])[0] or "").strip()
         names = [n for n in re.split(r"[,\s]+", names_raw) if n]
-        start = (data.get("start", ["2023-07-18"])[0] or "2023-07-18").strip()
+        start = (data.get("start", ["2020-01-01"])[0] or "2020-01-01").strip()
         end = (data.get("end", [""])[0] or "").strip() or datetime.date.today().strftime("%Y-%m-%d")
         strategy = (data.get("strategy", ["kdj_macd_dual_entry.toml"])[0] or "kdj_macd_dual_entry.toml").strip()
         if not symbols:

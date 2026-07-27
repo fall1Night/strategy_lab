@@ -40,10 +40,10 @@ def normalize_symbol(symbol: str) -> dict[str, str]:
 def ensure_data(
     symbol_cfg: dict[str, str],
     out_dir: str | Path,
-    daily_beg: str = "20220706",
+    daily_beg: str = "20200101",
     daily_end: str = "20260718",
-    daily_lmt: int = 1500,
-    weekly_beg: str = "20211210",
+    daily_lmt: int = 2500,
+    weekly_beg: str = "20200101",
     weekly_end: str = "20260718",
     weekly_lmt: int = 500,
     mode: str = "update",
