@@ -48,10 +48,13 @@ def _log_data_status(
     daily_csv: Path,
     weekly_csv: Path,
     fetched: bool,
+    range_beg: str,
+    range_end: str,
 ) -> None:
     """打印统一的增量取数状态日志。
 
-    从 meta 文件读取缓存行数与日期区间；meta 缺失时回退到 DataFrame。
+    行数从 meta 文件读取（缓存实际条数）；日期区间用传入的回测所需范围
+    （而非缓存全量范围），确保与"更新数据源"的 genesis 一致。
     """
     daily_meta_path = daily_csv.parent / (daily_csv.stem + "_meta.json")
     weekly_meta_path = weekly_csv.parent / (weekly_csv.stem + "_meta.json")
@@ -68,21 +71,15 @@ def _log_data_status(
     if n_weekly is None:
         n_weekly = len(weekly)
 
-    # 日期区间：优先用 meta.beg/meta.end，缺失则取首末日期的自然格式
-    if daily_meta and daily_meta.get("beg") and daily_meta.get("end"):
-        range_beg = _fmt_date_ymd(str(daily_meta["beg"]))
-        range_end = _fmt_date_ymd(str(daily_meta["end"]))
-    elif len(daily) > 0:
-        range_beg = pd.Timestamp(daily["date"].iloc[0]).strftime("%Y.%-m.%-d")
-        range_end = pd.Timestamp(daily["date"].iloc[-1]).strftime("%Y.%-m.%-d")
-    else:
-        range_beg = range_end = "N/A"
+    # 日期区间使用回测所需范围（YYYYMMDD → YYYY.M.D）
+    beg_label = _fmt_date_ymd(range_beg)
+    end_label = _fmt_date_ymd(range_end)
 
     fetch_label = "需要拉取" if fetched else "无需拉取"
     print(
         f"  [增量取数] {symbol}: "
         f"日线 {n_daily} 条 / 周线 {n_weekly} 条，"
-        f"当前范围为{range_beg}-{range_end}，"
+        f"当前范围为{beg_label}-{end_label}，"
         f"{fetch_label}，正在本地计算"
     )
 
@@ -107,16 +104,23 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
     else:
         sym_cfg.setdefault("symbol_name", sym_cfg["symbol"])
 
-    # 取数 warmup 区间：日线早 1 年、周线早约 1.5 年
-    # verify 仅校验缓存是否覆盖回测所需区间 [daily_beg, end]；
-    # 缓存末日落后于今天不触发重拉（仅当回测 end 超出缓存范围时才需补数据）。
+    # 取数区间：[GENESIS, end] 与更新数据源完全一致；日线/周线的 warmup 提前量
+    # 仅在不早于 GENESIS 的范围内生效（钳住下限，避免前推到 2019 年导致与缓存不一致）。
+    # verify 仅校验缓存是否覆盖回测所需区间；缓存末日落后于今天不触发重拉。
     # update 模式则取到 max(end, 今天)，确保补足后数据尽量新。
+    GENESIS = "20200101"
     start_ts = pd.Timestamp(start)
     end_ts = pd.Timestamp(end)
     today = pd.Timestamp.now().normalize()
     fetch_end = max(end_ts, today)
-    daily_beg = (start_ts - pd.DateOffset(years=1)).strftime("%Y%m%d")
-    weekly_beg = (start_ts - pd.DateOffset(years=1, months=6)).strftime("%Y%m%d")
+    daily_beg = max(
+        GENESIS,
+        (start_ts - pd.DateOffset(years=1)).strftime("%Y%m%d"),
+    )
+    weekly_beg = max(
+        GENESIS,
+        (start_ts - pd.DateOffset(years=1, months=6)).strftime("%Y%m%d"),
+    )
     end_str = end_ts.strftime("%Y%m%d")
     fetch_end_str = fetch_end.strftime("%Y%m%d")
     fetched = False
@@ -142,7 +146,8 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
     weekly = data_feed.load_bars(weekly_csv)
 
     # 统一日志：该标的的缓存状态 & 是否需要联网取数
-    _log_data_status(sym_cfg["symbol"], daily, weekly, daily_csv, weekly_csv, fetched)
+    _log_data_status(sym_cfg["symbol"], daily, weekly, daily_csv, weekly_csv,
+                     fetched, daily_beg, end_str)
 
     cls = get_strategy_class(strategy_cfg["type"])
     strat = cls(strategy_cfg)

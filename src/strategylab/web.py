@@ -30,6 +30,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .engine.config import load_strategy_by_arg, list_available_strategies
 from .engine.backtest import run_symbol
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from .engine.dashboard import build_compare_dashboard, build_compare_from_runs
 from .engine.vendor.render_dashboard import render_dashboard
 from .engine.search import search_a_stocks
@@ -84,17 +86,49 @@ def run_backtest(symbols: list[str], start: str, end: str, strategy_arg: str,
                  names: list[str] | None = None) -> str:
     """跑回测，写 index.html（渲染视图）到 data/ 目录，返回其 HTML 文本。"""
     import uuid
+    import traceback
 
     cfg = _resolve_strategy(strategy_arg)
     out_dir = get_data_dir()
     batch_id = str(uuid.uuid4())
     name_list = names or []
-    results = {}
-    for idx, sym in enumerate(symbols):
+    results: dict[str, dict] = {}
+    _results_lock = threading.Lock()
+    errors: list[str] = []
+
+    def _run_one(idx_sym: tuple[int, str]) -> None:
+        idx, sym = idx_sym
         sym = sym.strip()
         stock_name = name_list[idx] if idx < len(name_list) and name_list[idx] else sym
-        r = run_symbol(cfg, sym, stock_name, start, end, out_dir, batch_id=batch_id)
-        results[r["prefix"]] = r
+        try:
+            r = run_symbol(cfg, sym, stock_name, start, end, out_dir, batch_id=batch_id)
+            with _results_lock:
+                results[r["prefix"]] = r
+        except Exception as e:
+            err_msg = f"{sym}: {e}"
+            logger.error("[run_one] %s", err_msg)
+            errors.append(err_msg)
+
+    # 单标的直接跑，多标的启用多线程（默认 4 路并发，降低内存峰值）
+    n = len(symbols)
+    if n <= 1:
+        for idx, sym in enumerate(symbols):
+            _run_one((idx, sym))
+    else:
+        workers = min(n, int(os.environ.get("STRATEGALAB_WEB_WORKERS", "4")))
+        logger.info("[run] 多股回测 %d 标的，%d 路并发", n, workers)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_run_one, (idx, sym)) for idx, sym in enumerate(symbols)]
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.error("[run] 线程异常: %s", traceback.format_exc())
+                    errors.append(str(e))
+
+    if not results and errors:
+        raise RuntimeError(f"全部 {n} 个标的回测失败：{'; '.join(errors[:5])}")
+
     out_html = out_dir / "index.html"
     build_compare_dashboard(results, cfg, out_html, start, end)
     return out_html.read_text(encoding="utf-8")
