@@ -102,10 +102,15 @@ class KlineCache:
     # 区间覆盖判断（沿用既有 _covers 逻辑）
     # ------------------------------------------------------------------
     @staticmethod
-    def _covers(meta: dict[str, Any] | None, beg: str, end: str) -> bool:
+    def _covers(meta: dict[str, Any] | None, beg: str, end: str,
+                end_tolerance_days: int = 0) -> bool:
         """请求区间 [beg, end] 是否 ⊆ 缓存区间 [meta.beg, meta.end]。
 
         beg/end 为 ``'YYYYMMDD'`` 字符串，同格式下字典序比较即时间序。
+
+        新增 ``end_tolerance_days``（FR-55）：快速回测场景下缓存末日永远
+        不可能覆盖"今天"，允许容忍末日落后 ``end`` 最多 N 天。默认 0
+        保持其他调用方语义完全不变。
         """
         if not meta:
             return False
@@ -113,7 +118,20 @@ class KlineCache:
         me = meta.get("end")
         if not mb or not me:
             return False
-        return mb <= beg and me >= end
+        if mb > beg:
+            return False
+        if me >= end:
+            return True
+        # 末日容差：当数据实际末日略早于请求末日时，允许几天的滞后
+        if end_tolerance_days > 0:
+            try:
+                end_dt = datetime.strptime(end, "%Y%m%d")
+                tolerance_date = (end_dt - timedelta(days=end_tolerance_days)).strftime("%Y%m%d")
+                if me >= tolerance_date:
+                    return True
+            except (ValueError, OverflowError):
+                pass
+        return False
 
     # ------------------------------------------------------------------
     # 增量更新辅助（FR-39：append 而非整文件覆盖）

@@ -313,9 +313,14 @@ class KlineProvider:
         """verify 模式：仅校验缓存覆盖所需区间，不足抛 ``DataMissingError``，绝不取数。
 
         FR-40：回测只校验、不取数；缺数据即由上层标记 failed 并提示先更新数据源。
+        FR-55：快速回测末日容差 —— 缓存末日永远不可能覆盖"今天"（当日数据
+        未产生时），允许末日落后最多 ``VERIFY_END_TOLERANCE_DAYS`` 天。
         """
         rb = required_beg if required_beg else daily_beg
         re = required_end if required_end else daily_end
+
+        # 末日容差：快速回测 end 默认填"今天"，缓存末日不可达，允许少许滞后
+        VERIFY_END_TOLERANCE_DAYS = 7
 
         daily_meta, _, is_legacy_d = self._cache._read_any_meta(
             out_dir, prefix, effective_source, "daily"
@@ -323,22 +328,26 @@ class KlineProvider:
         weekly_meta, _, is_legacy_w = self._cache._read_any_meta(
             out_dir, prefix, effective_source, "weekly"
         )
-        daily_ok = self._cache._covers(daily_meta, rb, re)
-        weekly_ok = self._cache._covers(weekly_meta, weekly_beg, weekly_end)
+        daily_ok = self._cache._covers(daily_meta, rb, re,
+                                       end_tolerance_days=VERIFY_END_TOLERANCE_DAYS)
+        weekly_ok = self._cache._covers(weekly_meta, weekly_beg, weekly_end,
+                                        end_tolerance_days=VERIFY_END_TOLERANCE_DAYS)
 
         # 旧格式兼容回退
         if not daily_ok and effective_source == "eastmoney" and is_legacy_d:
             old_meta = self._cache._read_meta(
                 self._cache._legacy_meta_path(out_dir, prefix, "daily")
             )
-            if self._cache._covers(old_meta, rb, re):
+            if self._cache._covers(old_meta, rb, re,
+                                   end_tolerance_days=VERIFY_END_TOLERANCE_DAYS):
                 daily_ok = True
                 daily_csv = self._cache._legacy_csv_path(out_dir, prefix, "daily")
         if not weekly_ok and effective_source == "eastmoney" and is_legacy_w:
             old_meta = self._cache._read_meta(
                 self._cache._legacy_meta_path(out_dir, prefix, "weekly")
             )
-            if self._cache._covers(old_meta, weekly_beg, weekly_end):
+            if self._cache._covers(old_meta, weekly_beg, weekly_end,
+                                   end_tolerance_days=VERIFY_END_TOLERANCE_DAYS):
                 weekly_ok = True
                 weekly_csv = self._cache._legacy_csv_path(out_dir, prefix, "weekly")
 
