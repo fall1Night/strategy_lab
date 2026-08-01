@@ -295,6 +295,28 @@ class KlineProvider:
         )
         return daily_csv, weekly_csv
 
+    @staticmethod
+    def _end_within_tolerance(meta: dict | None, required_end: str,
+                              tolerance_days: int) -> bool:
+        """仅检查缓存末日是否落在 ``required_end`` 的容忍窗口内。
+
+        用于新股容差：缓存首日晚于 GENESIS（上市较晚），但末日足够新即视为可用。
+        """
+        if not meta:
+            return False
+        me = meta.get("end") or meta.get("last") or ""
+        if not me:
+            return False
+        if me >= required_end:
+            return True
+        from datetime import datetime, timedelta
+        try:
+            end_dt = datetime.strptime(required_end, "%Y%m%d")
+            tolerance_date = (end_dt - timedelta(days=tolerance_days)).strftime("%Y%m%d")
+            return me >= tolerance_date
+        except (ValueError, OverflowError):
+            return False
+
     def _ensure_verify(
         self,
         symbol: str,
@@ -313,8 +335,10 @@ class KlineProvider:
         """verify 模式：仅校验缓存覆盖所需区间，不足抛 ``DataMissingError``，绝不取数。
 
         FR-40：回测只校验、不取数；缺数据即由上层标记 failed 并提示先更新数据源。
-        FR-55：快速回测末日容差 —— 缓存末日永远不可能覆盖"今天"（当日数据
-        未产生时），允许末日落后最多 ``VERIFY_END_TOLERANCE_DAYS`` 天。
+        FR-55：快速回测末日容差 + 新股首日容差 ——
+          - 末日容差：缓存末日永远不可能覆盖"今天"，允许落后最多 N 天。
+          - 新股容差：上市日晚于 GENESIS 的标的，缓存首日 > required_beg
+            是正常现象（数据源本来就没有上市前的数据），只要末日足够新即视为可用。
         """
         rb = required_beg if required_beg else daily_beg
         re = required_end if required_end else daily_end
@@ -333,6 +357,17 @@ class KlineProvider:
         weekly_ok = self._cache._covers(weekly_meta, weekly_beg, weekly_end,
                                         end_tolerance_days=VERIFY_END_TOLERANCE_DAYS)
 
+        # 新股容差：_covers 的 beg 检查对新股永远失败（上市日 > GENESIS），
+        # 回退为仅检查末日是否在容忍窗口内（数据源本来就拿不到上市前的）。
+        if not daily_ok and daily_meta:
+            daily_ok = self._end_within_tolerance(
+                daily_meta, re, VERIFY_END_TOLERANCE_DAYS
+            )
+        if not weekly_ok and weekly_meta:
+            weekly_ok = self._end_within_tolerance(
+                weekly_meta, weekly_end, VERIFY_END_TOLERANCE_DAYS
+            )
+
         # 旧格式兼容回退
         if not daily_ok and effective_source == "eastmoney" and is_legacy_d:
             old_meta = self._cache._read_meta(
@@ -342,6 +377,12 @@ class KlineProvider:
                                    end_tolerance_days=VERIFY_END_TOLERANCE_DAYS):
                 daily_ok = True
                 daily_csv = self._cache._legacy_csv_path(out_dir, prefix, "daily")
+            elif old_meta:
+                daily_ok = self._end_within_tolerance(
+                    old_meta, re, VERIFY_END_TOLERANCE_DAYS
+                )
+                if daily_ok:
+                    daily_csv = self._cache._legacy_csv_path(out_dir, prefix, "daily")
         if not weekly_ok and effective_source == "eastmoney" and is_legacy_w:
             old_meta = self._cache._read_meta(
                 self._cache._legacy_meta_path(out_dir, prefix, "weekly")
@@ -350,6 +391,12 @@ class KlineProvider:
                                    end_tolerance_days=VERIFY_END_TOLERANCE_DAYS):
                 weekly_ok = True
                 weekly_csv = self._cache._legacy_csv_path(out_dir, prefix, "weekly")
+            elif old_meta:
+                weekly_ok = self._end_within_tolerance(
+                    old_meta, weekly_end, VERIFY_END_TOLERANCE_DAYS
+                )
+                if weekly_ok:
+                    weekly_csv = self._cache._legacy_csv_path(out_dir, prefix, "weekly")
 
         if not (daily_ok and weekly_ok):
             raise DataMissingError(
