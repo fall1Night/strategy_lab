@@ -182,12 +182,32 @@ class KlineProvider:
         daily_need_front = _cache_needs_front(daily_meta, daily_beg)
         weekly_need_front = _cache_needs_front(weekly_meta, weekly_beg)
 
+        # vol 健康检查（update 模式）：历史缓存 vol 缺失（旧适配器未抓 vol，后续
+        # 增量永不补齐）→ 强制全量重拉，merge 去重会用新数据补齐历史段 vol。
+        # 缓存 vol 正常时保持原增量窗口逻辑不变（只拉增量段）；无缓存返回 False。
+        daily_vol_missing = self._cache_csv_missing_volume(
+            out_dir, prefix, effective_source, "daily", daily_csv, is_legacy_d
+        )
+        weekly_vol_missing = self._cache_csv_missing_volume(
+            out_dir, prefix, effective_source, "weekly", weekly_csv, is_legacy_w
+        )
+        if daily_vol_missing:
+            print(f"  [vol修复] {symbol}: 日线缓存缺 vol → 强制全量重拉")
+            daily_beg_calc = daily_beg
+            need_daily = True
+        if weekly_vol_missing:
+            print(f"  [vol修复] {symbol}: 周线缓存缺 vol → 强制全量重拉")
+            weekly_beg_calc = weekly_beg
+            need_weekly = True
+
         # 旧格式兼容：新格式无 meta 但旧格式已是最新 → 视为最新、用旧路径跳过
+        # （vol 缺失时不做此跳过，必须全量重拉补齐历史段）
         if (
             need_daily
             and effective_source == "eastmoney"
             and is_legacy_d
             and not daily_need_front
+            and not daily_vol_missing
         ):
             old_meta = self._cache._read_meta(
                 self._cache._legacy_meta_path(out_dir, prefix, "daily")
@@ -200,6 +220,7 @@ class KlineProvider:
             and effective_source == "eastmoney"
             and is_legacy_w
             and not weekly_need_front
+            and not weekly_vol_missing
         ):
             old_meta = self._cache._read_meta(
                 self._cache._legacy_meta_path(out_dir, prefix, "weekly")
@@ -227,11 +248,19 @@ class KlineProvider:
             need_weekly = weekly_beg_calc is not None
             daily_need_front = _cache_needs_front(daily_meta, daily_beg)
             weekly_need_front = _cache_needs_front(weekly_meta, weekly_beg)
+            # vol 缺失结果在锁内沿用（防并发下被"已最新"增量窗口逻辑跳过）
+            if daily_vol_missing:
+                daily_beg_calc = daily_beg
+                need_daily = True
+            if weekly_vol_missing:
+                weekly_beg_calc = weekly_beg
+                need_weekly = True
             if (
                 need_daily
                 and effective_source == "eastmoney"
                 and is_legacy_d
                 and not daily_need_front
+                and not daily_vol_missing
             ):
                 old_meta = self._cache._read_meta(
                     self._cache._legacy_meta_path(out_dir, prefix, "daily")
@@ -244,6 +273,7 @@ class KlineProvider:
                 and effective_source == "eastmoney"
                 and is_legacy_w
                 and not weekly_need_front
+                and not weekly_vol_missing
             ):
                 old_meta = self._cache._read_meta(
                     self._cache._legacy_meta_path(out_dir, prefix, "weekly")
@@ -294,6 +324,29 @@ class KlineProvider:
             f"/ 周线 {n_w if need_weekly else '复用'} 条"
         )
         return daily_csv, weekly_csv
+
+    def _cache_csv_missing_volume(
+        self,
+        out_dir: Path,
+        prefix: str,
+        effective_source: str,
+        period: str,
+        new_csv: Path,
+        is_legacy: bool,
+    ) -> bool:
+        """update 模式下轻量判断缓存 CSV 是否缺 vol（存量缓存健康检查）。
+
+        只读 CSV 头 + 抽查少量行（``nrows=5``，见 ``KlineCache.has_volume_data``），
+        全市场批量跑时保持轻量；CSV 不存在（无缓存）返回 ``False``，由既有逻辑
+        走全量首拉。新格式优先，旧格式兼容回退到 legacy 路径。
+        """
+        if new_csv.exists():
+            return not self._cache.has_volume_data(new_csv)
+        if is_legacy:
+            legacy_csv = self._cache._legacy_csv_path(out_dir, prefix, period)
+            if legacy_csv.exists():
+                return not self._cache.has_volume_data(legacy_csv)
+        return False
 
     @staticmethod
     def _end_within_tolerance(meta: dict | None, required_end: str,

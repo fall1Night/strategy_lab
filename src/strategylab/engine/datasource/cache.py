@@ -100,6 +100,32 @@ class KlineCache:
         return None, source, False
 
     # ------------------------------------------------------------------
+    # vol 健康检查（update 模式下历史缓存缺成交量检测）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def has_volume_data(csv_path: "Path | str") -> bool:
+        """轻量判断缓存 CSV 是否含可用成交量（vol 列 + 抽查行有值）。
+
+        历史遗留：旧适配器未抓 vol，历史缓存 vol 全空，后续增量更新永不补齐。
+        用于 update 模式下的存量缓存健康检查 —— 只读 CSV 头 + 抽查少量行
+        （``nrows=5``），不做全文件扫描，2181 个标的批量跑时保持轻量。
+
+        Returns:
+            ``True`` = 有 ``vol`` 列且抽查行含非空 vol；``False`` = 文件不存在
+            / 无 vol 列 / 抽查行 vol 全空（NaN/空串） / 读取失败。
+        """
+        path = Path(csv_path)
+        if not path.exists():
+            return False
+        try:
+            sample = pd.read_csv(path, nrows=5)
+        except (ValueError, OSError, pd.errors.ParserError):
+            return False
+        if "vol" not in sample.columns or sample.empty:
+            return False
+        return bool(sample["vol"].notna().any())
+
+    # ------------------------------------------------------------------
     # 区间覆盖判断（沿用既有 _covers 逻辑）
     # ------------------------------------------------------------------
     @staticmethod
