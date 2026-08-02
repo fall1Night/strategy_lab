@@ -25,7 +25,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import case, func, text
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
 from .db import SessionLocal, get_session, init_db
 from .schema import BacktestRun, EquityPoint, PricePoint, Trade, Summary, Batch, BatchItem
@@ -199,10 +199,12 @@ def get_run(run_id: str) -> dict[str, Any] | None:
         run = (
             s.query(BacktestRun)
             .options(
-                joinedload(BacktestRun.equity),
-                joinedload(BacktestRun.price),
-                joinedload(BacktestRun.trades),
-                joinedload(BacktestRun.summary),
+                # 多个一对多关系必须用 selectinload：joinedload 会产生 JOIN 笛卡尔积
+                # （equity × price × trades），带 price_points 的 run 会爆行数卡死
+                selectinload(BacktestRun.equity),
+                selectinload(BacktestRun.price),
+                selectinload(BacktestRun.trades),
+                selectinload(BacktestRun.summary),
             )
             .filter(BacktestRun.run_id == run_id)
             .first()
@@ -248,10 +250,11 @@ def list_runs_by_ids(run_ids: list[str]) -> list[dict[str, Any]]:
         runs = (
             s.query(BacktestRun)
             .options(
-                joinedload(BacktestRun.equity),
-                joinedload(BacktestRun.price),
-                joinedload(BacktestRun.trades),
-                joinedload(BacktestRun.summary),
+                # 同 get_run：多个一对多关系用 selectinload 避免 JOIN 笛卡尔积卡死
+                selectinload(BacktestRun.equity),
+                selectinload(BacktestRun.price),
+                selectinload(BacktestRun.trades),
+                selectinload(BacktestRun.summary),
             )
             .filter(BacktestRun.run_id.in_(uniq))
             .all()

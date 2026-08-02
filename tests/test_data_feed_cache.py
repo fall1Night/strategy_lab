@@ -34,14 +34,25 @@ SYMBOL = SYM["symbol"]
 
 
 def _fake_klines_df() -> pd.DataFrame:
-    """返回可被 cache.merge 消费的 DataFrame（含 date/open/high/low/close）。"""
+    """返回可被 cache.merge 消费的 DataFrame（含 date/open/high/low/close/vol）。
+
+    注意：必须含 vol 列且有值 —— provider.ensure_data 的 update 模式会对缓存做
+    vol 健康检查（has_volume_data），若 vol 全空/缺列会判定"存量缓存缺 vol"并
+    强制全量重拉，破坏"已最新应复用"等增量断言。
+    """
     return pd.DataFrame(
         {
-            "date": ["2022-01-01", "2023-01-01"],
+            # 两个要求缺一不可：
+            # 1) 首日早于 ensure_data 的 default_beg（20200101），否则 _incremental_window
+            #    判定"往前补"（FR-39 双向补）恒全量重拉，破坏"已最新应复用"断言；
+            # 2) 末日 = today（测试 _FakeDate 冻结为 2023-01-01），否则缓存 last < today
+            #    判定"落后"恒增量拉取，同样破坏"已最新应复用"。
+            "date": ["2019-01-01", "2023-01-01"],
             "open": [10.0, 11.0],
             "high": [12.0, 13.0],
             "low": [9.0, 10.0],
             "close": [11.0, 12.0],
+            "vol": [100000.0, 120000.0],
         }
     )
 
@@ -123,7 +134,9 @@ def test_atomic_write_no_tmp_leftover(monkeypatch):
     )
     assert meta["beg"] is not None
     assert meta["end"] is not None
-    assert meta["version"] == 2
+    # cache 版本 2→3：K线功能新增 vol 列时升级（cache.py _atomic_write_meta），
+    # 该断言随版本升级同步更新
+    assert meta["version"] == 3
     assert meta.get("source") == eff
 
 
