@@ -1,0 +1,28 @@
+# =====================================================================
+# 策略配置：短买卖逻辑（基于 25 日 RSV 的双 EMA 快慢线交叉）
+# ---------------------------------------------------------------------
+# 想改参数 / 新增策略，复制本文件改 [params] 即可，运行时不改任何代码。
+#   - name   : 展示用名称
+#   - type   : 必须对应 engine/strategies/short_buy_sell.py 的 type 字段
+#   - market : china_a / us_stock / hong_kong
+# 运行示例见 README.md
+# =====================================================================
+
+name = "短买卖逻辑"
+type = "short_buy_sell"
+market = "china_a"
+description = "25日RSV的双EMA(快5/慢20)交叉长多策略: 快线VAR4上穿慢线VAR3金叉买入(短买); 死叉卖出, 距上次买入≤3根标记为止损, 否则标记为短卖。执行价=当日信号+当日收盘(含look-ahead偏差)。"
+
+[params]
+initial_cash = 200000          # 初始资金(元)
+buy_amount = 100000            # 单次买入额(元)
+commission = 0.0003            # 佣金(双边, 比例)
+stamp_tax = 0.0005             # 印花税(仅卖方, 比例)
+lot_size = 100                 # A股每手股数
+execution = "same_day_close"   # 执行价: 当日信号+当日收盘(含 look-ahead 偏差)
+
+[params.rsv]
+rsv_period = 25                # RSV 回望窗口(25日最高/最低)
+fast = 5                       # VAR4 = EMA(RSV, fast)  快线
+slow = 20                      # VAR3 = EMA(RSV, slow)  慢线
+ema_trend = 10                 # 典型价EMA趋势线周期(原始指标项, 本策略未用于信号)
