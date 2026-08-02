@@ -40,7 +40,7 @@ class DataSourceFactory:
         则抛 ``MissingDependencyError``。
 
         Args:
-            name: 数据源名称（``eastmoney`` / ``akshare`` / ``tushare`` / ``broker``）。
+            name: 数据源名称（``eastmoney`` / ``akshare`` / ``tencent`` / ``tushare`` / ``broker``）。
             cfg: ``DataSourceConfig`` 实例。
 
         Returns:
@@ -77,6 +77,10 @@ class DataSourceFactory:
             from .akshare_src import AkshareDataSource
 
             return AkshareDataSource(cfg)
+        elif name == "tencent":
+            from .tencent_src import TencentDataSource
+
+            return TencentDataSource(cfg)
         elif name == "tushare":
             from .tushare_src import TushareDataSource
 
@@ -86,7 +90,7 @@ class DataSourceFactory:
 
             return BrokerDataSource(cfg)
         else:
-            raise ValueError(f"未知数据源: {name}，支持: eastmoney, akshare, tushare, broker")
+            raise ValueError(f"未知数据源: {name}，支持: eastmoney, akshare, tencent, tushare, broker")
 
     def get_effective_source(self, symbol: str) -> str:
         """解析某标的的生效数据源名称。
@@ -151,7 +155,7 @@ class DataSourceFactory:
             已加载数据源名称列表（按注册顺序）。
         """
         result: list[str] = []
-        for name in ("eastmoney", "akshare", "tushare", "broker"):
+        for name in ("eastmoney", "akshare", "tencent", "tushare", "broker"):
             try:
                 self.get(name, self._config)
                 result.append(name)
