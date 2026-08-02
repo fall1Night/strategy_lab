@@ -145,6 +145,33 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
     daily = data_feed.load_bars(daily_csv)
     weekly = data_feed.load_bars(weekly_csv)
 
+    # 构造回测窗口内的价格曲线（K 线 + 成交量），供明细页走势图与落库使用。
+    # 仅取 [start, end] 窗口，保证与 equity_curve / trade_history 日期轴对齐。
+    window_mask = (daily["date"] >= start_ts) & (daily["date"] <= end_ts)
+    window_df = daily.loc[window_mask]
+    price_curve: list[dict[str, Any]] = []
+    has_vol = "vol" in daily.columns
+    for _, row in window_df.iterrows():
+        raw_vol = row.get("vol") if has_vol else None
+        # NaN / None → None（旧缓存无成交量时副图显示占位）
+        vol_val: float | None = None
+        if raw_vol is not None and not (
+            isinstance(raw_vol, float) and pd.isna(raw_vol)
+        ):
+            vol_val = float(raw_vol)
+        dt = row["date"]
+        date_str = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)[:10]
+        price_curve.append(
+            {
+                "date": date_str,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": vol_val,
+            }
+        )
+
     # 统一日志：该标的的缓存状态 & 是否需要联网取数
     _log_data_status(sym_cfg["symbol"], daily, weekly, daily_csv, weekly_csv,
                      fetched, daily_beg, end_str)
@@ -198,7 +225,8 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
         "data_source": data_source,
     }
     run_id = repository.save_run(
-        run_meta, equity_curve, trade_history, summary, res.get("positions")
+        run_meta, equity_curve, trade_history, summary, res.get("positions"),
+        price_curve=price_curve,
     )
 
     return {
@@ -212,5 +240,6 @@ def run_symbol(strategy_cfg: dict[str, Any], symbol: str, name: str | None,
         "positions": res["positions"],
         "equity_curve": equity_curve,
         "trade_history": trade_history,
+        "price_curve": price_curve,
         "run_id": run_id,
     }

@@ -75,6 +75,7 @@ class BacktestRun(Base):
     )  # P0-4：数据源标识（eastmoney/akshare/tushare），运行复用键扩展
 
     equity = relationship("EquityPoint", cascade="all,delete-orphan")
+    price = relationship("PricePoint", cascade="all,delete-orphan")
     trades = relationship("Trade", cascade="all,delete-orphan")
     summary = relationship("Summary", cascade="all,delete-orphan", uselist=False)
 
@@ -88,6 +89,30 @@ class EquityPoint(Base):
     )
     date: Mapped[datetime.date] = mapped_column(Date, index=True)
     value: Mapped[float] = mapped_column(Numeric(18, 4))
+
+
+class PricePoint(Base):
+    """单标的回测窗口内的日线价格点（OHLC + 成交量），用于明细页 K 线走势图。
+
+    与 ``EquityPoint`` 同构，1—* 关联 ``BacktestRun``；删除 run 时 cascade
+    一并清除。``volume`` 可空：旧缓存（无成交量）落库时为 ``NULL``，前端副图
+    显示「成交量数据缺失」占位。
+    """
+
+    __tablename__ = "price_points"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("backtest_runs.run_id"), index=True
+    )
+    date: Mapped[datetime.date] = mapped_column(Date, index=True)
+    open: Mapped[float] = mapped_column(Numeric(18, 4))
+    high: Mapped[float] = mapped_column(Numeric(18, 4))
+    low: Mapped[float] = mapped_column(Numeric(18, 4))
+    close: Mapped[float] = mapped_column(Numeric(18, 4))
+    volume: Mapped[float | None] = mapped_column(
+        Numeric(18, 4), nullable=True
+    )  # 旧缓存无成交量时为 NULL
 
 
 class Trade(Base):

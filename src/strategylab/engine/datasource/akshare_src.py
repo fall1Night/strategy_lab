@@ -113,6 +113,8 @@ class AkshareDataSource(DataSource):
             "收盘": "close",
             "最高": "high",
             "最低": "low",
+            "成交量": "vol",
+            "volume": "vol",
         }
         # stock_zh_a_daily 的列名可能是中文或英文
         for eng, std in col_map.items():
@@ -133,14 +135,22 @@ class AkshareDataSource(DataSource):
             ["open", "high", "low", "close"]
         ].apply(pd.to_numeric, errors="coerce")
 
-        # 周线：由日线 resample 聚合
+        # 成交量（vol）：新浪源中文列"成交量"或英文列"volume"，保持原始股数；
+        # 缺失则不补列（后续落库/回测容错为 None）。
+        if "vol" in df.columns:
+            result["vol"] = pd.to_numeric(df["vol"], errors="coerce")
+
+        # 周线：由日线 resample 聚合（成交量按区间求和）
         if period == "102":
-            result = result.set_index("date").resample("W-FRI").agg({
+            agg = {
                 "open": "first",
                 "high": "max",
                 "low": "min",
                 "close": "last",
-            }).dropna().reset_index()
+            }
+            if "vol" in result.columns:
+                agg["vol"] = "sum"
+            result = result.set_index("date").resample("W-FRI").agg(agg).dropna().reset_index()
 
         return result.sort_values("date").reset_index(drop=True)
 

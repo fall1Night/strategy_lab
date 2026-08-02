@@ -135,6 +135,9 @@ class TushareDataSource(DataSource):
             "close": "close",
             "high": "high",
             "low": "low",
+            # tushare daily 自带 vol 列（单位：手），原样保留供成交量副图使用
+            "vol": "vol",
+            "volume": "vol",
         }
         df.rename(columns=col_map, inplace=True)
 
@@ -150,7 +153,12 @@ class TushareDataSource(DataSource):
         # date 列转字符串 YYYYMMDD
         df["date"] = df["date"].astype(str)
 
-        return df[required].sort_values("date").reset_index(drop=True)
+        # 成交量（vol）：原样保留；缺失则不补列（后续落库/回测容错为 None）
+        selected = list(required)
+        if "vol" in df.columns:
+            selected.append("vol")
+
+        return df[selected].sort_values("date").reset_index(drop=True)
 
     @staticmethod
     def _daily_to_weekly(df_daily: pd.DataFrame) -> pd.DataFrame:
@@ -169,15 +177,19 @@ class TushareDataSource(DataSource):
 
         # 按周聚合
         df["week"] = df["trade_date"].dt.to_period("W")
+        agg = {
+            "trade_date": ("trade_date", "last"),
+            "open": ("open", "first"),
+            "high": ("high", "max"),
+            "low": ("low", "min"),
+            "close": ("close", "last"),
+        }
+        # 成交量按周求和（vol 存在时）
+        if "vol" in df.columns:
+            agg["vol"] = ("vol", "sum")
         weekly = (
             df.groupby("week")
-            .agg(
-                trade_date=("trade_date", "last"),
-                open=("open", "first"),
-                high=("high", "max"),
-                low=("low", "min"),
-                close=("close", "last"),
-            )
+            .agg(**agg)
             .reset_index(drop=True)
         )
         weekly["trade_date"] = weekly["trade_date"].dt.strftime("%Y%m%d")

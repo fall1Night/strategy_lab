@@ -28,7 +28,7 @@ from sqlalchemy import case, func, text
 from sqlalchemy.orm import joinedload
 
 from .db import SessionLocal, get_session, init_db
-from .schema import BacktestRun, EquityPoint, Trade, Summary, Batch, BatchItem
+from .schema import BacktestRun, EquityPoint, PricePoint, Trade, Summary, Batch, BatchItem
 from .serializers import db_row_to_result
 
 # FR-41：数据时效阈值（天），与 FR-31 共用单一真相源，可配 STRATEGALAB_STALE_DAYS。
@@ -92,11 +92,12 @@ def save_run(
     trade_history: list[dict[str, Any]],
     summary: dict[str, Any],
     positions: Any = None,
+    price_curve: list[dict[str, Any]] | None = None,
 ) -> str:
     """保存一次完整回测结果，返回 run_id。失败向上抛（由调用方明确报错）。
 
-    FR-15：用 ``bulk_insert_mappings`` 批量写入 equity / trades，比逐条 ORM
-    append 快 10-50 倍；权益点 / 成交明细量大时尤为明显。
+    FR-15：用 ``bulk_insert_mappings`` 批量写入 equity / trades / price，比逐条
+    ORM append 快 10-50 倍；权益点 / 成交明细 / 价格点量大时尤为明显。
     """
     init_db()
     run_id = str(uuid.uuid4())
@@ -163,11 +164,28 @@ def save_run(
         meta_json=run_meta.get("meta_json"),
     )
 
+    price_maps: list[dict[str, Any]] = []
+    for p in price_curve or []:
+        price_maps.append(
+            {
+                "run_id": run_id,
+                "date": _parse_date(p.get("date")),
+                "open": _safe_float(p.get("open")) or 0.0,
+                "high": _safe_float(p.get("high")) or 0.0,
+                "low": _safe_float(p.get("low")) or 0.0,
+                "close": _safe_float(p.get("close")) or 0.0,
+                # 成交量允许 None（旧缓存无 vol 时为 NULL）
+                "volume": _safe_float(p.get("volume")),
+            }
+        )
+
     with get_session() as s:
         s.add(run)
         s.flush()  # 先落 run，确保外键父行存在
         if equity_maps:
             s.bulk_insert_mappings(EquityPoint, equity_maps)
+        if price_maps:
+            s.bulk_insert_mappings(PricePoint, price_maps)
         if trade_maps:
             s.bulk_insert_mappings(Trade, trade_maps)
         s.add(summary_obj)
@@ -182,6 +200,7 @@ def get_run(run_id: str) -> dict[str, Any] | None:
             s.query(BacktestRun)
             .options(
                 joinedload(BacktestRun.equity),
+                joinedload(BacktestRun.price),
                 joinedload(BacktestRun.trades),
                 joinedload(BacktestRun.summary),
             )
@@ -230,6 +249,7 @@ def list_runs_by_ids(run_ids: list[str]) -> list[dict[str, Any]]:
             s.query(BacktestRun)
             .options(
                 joinedload(BacktestRun.equity),
+                joinedload(BacktestRun.price),
                 joinedload(BacktestRun.trades),
                 joinedload(BacktestRun.summary),
             )
@@ -412,6 +432,9 @@ def clear_strategy_runs(
             return 0
         # 顺序 DELETE 关联明细（避免外键约束 / 触发器问题）
         s.query(EquityPoint).filter(EquityPoint.run_id.in_(run_ids)).delete(
+            synchronize_session=False
+        )
+        s.query(PricePoint).filter(PricePoint.run_id.in_(run_ids)).delete(
             synchronize_session=False
         )
         s.query(Trade).filter(Trade.run_id.in_(run_ids)).delete(

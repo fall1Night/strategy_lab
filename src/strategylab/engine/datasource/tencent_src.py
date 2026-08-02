@@ -128,6 +128,8 @@ class TencentDataSource(DataSource):
             "最高": "high",
             "low": "low",
             "最低": "low",
+            "成交量": "vol",
+            "volume": "vol",
         }
         for eng, std in col_map.items():
             if eng in df.columns:
@@ -147,14 +149,22 @@ class TencentDataSource(DataSource):
             ["open", "high", "low", "close"]
         ].apply(pd.to_numeric, errors="coerce")
 
-        # 周线：由日线 resample 聚合（与 akshare_src 一致）
+        # 成交量（vol）：腾讯源中文列"成交量"或英文列"volume"，保持原始股数；
+        # 缺失则不补列（后续落库/回测容错为 None）。
+        if "vol" in df.columns:
+            result["vol"] = pd.to_numeric(df["vol"], errors="coerce")
+
+        # 周线：由日线 resample 聚合（成交量按区间求和，与 akshare_src 一致）
         if period == "102":
-            result = result.set_index("date").resample("W-FRI").agg({
+            agg = {
                 "open": "first",
                 "high": "max",
                 "low": "min",
                 "close": "last",
-            }).dropna().reset_index()
+            }
+            if "vol" in result.columns:
+                agg["vol"] = "sum"
+            result = result.set_index("date").resample("W-FRI").agg(agg).dropna().reset_index()
 
         return result.sort_values("date").reset_index(drop=True)
 

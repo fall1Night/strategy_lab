@@ -863,6 +863,105 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 6px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--muted-2); }
+
+    /* ---------------- price chart (K线 + 成交量 + 缩放) ---------------- */
+    .price-chart-shell {
+      display: flex;
+      flex-direction: column;
+      height: 540px;
+    }
+    .price-chart-shell .price-svg-wrap {
+      flex: 1 1 auto;
+      min-height: 0;
+      position: relative;
+    }
+    .price-chart-shell .price-svg-wrap svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+    }
+    .price-chart-shell .price-svg-wrap svg text { font-family: inherit; }
+
+    .price-chart-controls {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 24px 16px;
+      border-top: 1px solid var(--border);
+    }
+    .price-reset-btn {
+      flex: 0 0 auto;
+      padding: 6px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.15s, color 0.15s;
+    }
+    .price-reset-btn:hover { background: var(--hover); color: var(--text-strong); }
+
+    .range-slider {
+      position: relative;
+      flex: 1 1 auto;
+      height: 30px;
+    }
+    .range-slider .range-track {
+      position: absolute;
+      left: 7px;
+      right: 7px;
+      top: 13px;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+    }
+    .range-slider .range-fill {
+      position: absolute;
+      top: 13px;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--accent);
+      opacity: 0.45;
+    }
+    .range-slider input[type="range"] {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 30px;
+      margin: 0;
+      background: none;
+      pointer-events: none;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    .range-slider input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      pointer-events: auto;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--bg);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+      cursor: pointer;
+    }
+    .range-slider input[type="range"]::-moz-range-thumb {
+      pointer-events: auto;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--bg);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -1194,6 +1293,100 @@
                 }).join('') +
               '</div>' +
             '</div>' +
+            '</article>'
+        );
+      }
+
+      if (module.type === 'combo_chart') {
+        // 组合图卡片：顶部 title + stats，中部图表宿主（buildComboChart 挂载），
+        // 底部 chart-controls（drawdown/trades toggle + 模式切换 + 买卖点图例）。
+        // 复用 overview_chart 的 tv-chart-top/tv-chart-stats/chart-controls 范式，不新增 CSS。
+        const stats = module.stats || [];
+        const toggles = module.toggles || [];
+        const modes = module.modes || [];
+        const legendActions = new Set();
+        (module.markers || []).forEach(function (m) {
+          const a = (m.action || '').toLowerCase();
+          if (a) legendActions.add(a);
+        });
+        function legendTri(direction, color) {
+          const points = direction === 'up'
+            ? '6,1 1,9 11,9'
+            : '6,9 1,1 11,1';
+          return '<svg width="12" height="10" viewBox="0 0 12 10">' +
+            '<polygon points="' + points + '" fill="' + color + '" />' +
+            '</svg>';
+        }
+        const LEGEND_DEFS = [
+          { action: 'buy',   dir: 'up',   color: 'var(--gain)', label: t('marker_buy',   '买入') },
+          { action: 'sell',  dir: 'down', color: 'var(--loss)', label: t('marker_sell',  '卖出') },
+          { action: 'short', dir: 'up',   color: 'var(--loss)', label: t('marker_short', '做空') },
+          { action: 'cover', dir: 'down', color: 'var(--gain)', label: t('marker_cover', '平空') },
+        ];
+        const legendHtml = LEGEND_DEFS
+          .filter(function (def) { return legendActions.has(def.action); })
+          .map(function (def) {
+            return '<span class="legend-item">' +
+              legendTri(def.dir, def.color) +
+              escapeHtml(def.label) +
+            '</span>';
+          })
+          .join('');
+        return (
+          '<article class="module tv-chart-card ' + span + '" data-module="' + idx + '">' +
+            titleHtml +
+            '<div class="tv-chart-top"><div class="tv-chart-stats">' +
+              stats.map(renderKpi).join('') +
+            '</div></div>' +
+            '<div class="tv-chart-area" id="module-host-' + idx + '"></div>' +
+            '<div class="chart-controls">' +
+              '<div class="toggle-row">' +
+                toggles.map(function (tg) {
+                  const id = tg.id || (tg.label || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+                  const swatch = tg.color || (id.indexOf('drawdown') >= 0 ? 'var(--loss)' : (id.indexOf('buy') >= 0 ? 'var(--accent)' : 'var(--gain)'));
+                  return '<span class="toggle-item ' + (tg.checked ? '' : 'muted') + '" data-toggle="' + id + '">' +
+                    '<span class="toggle-swatch" style="background:' + swatch + '"></span>' +
+                    escapeHtml(tg.label) +
+                  '</span>';
+                }).join('') +
+                (legendHtml ? '<span class="legend-divider"></span>' + legendHtml : '') +
+              '</div>' +
+              '<div class="mode-switch">' +
+                modes.map(function (m) {
+                  const id = m.id || (m.label || '').toLowerCase();
+                  return '<span class="mode-chip ' + (m.active ? 'active' : '') + '" data-mode="' + id + '">' + escapeHtml(m.label) + '</span>';
+                }).join('') +
+              '</div>' +
+            '</div>' +
+          '</article>'
+        );
+      }
+
+      if (module.type === 'price_chart') {
+        // 买卖点图例（仅显示实际出现的 action，与 overview_chart 同范式）
+        const legendActions = new Set();
+        (module.markers || []).forEach(function (m) {
+          const a = (m.action || '').toLowerCase();
+          if (a) legendActions.add(a);
+        });
+        const PLEGEND = [
+          { action: 'buy', dir: 'up', color: 'var(--gain)', label: t('marker_buy', '买入') },
+          { action: 'sell', dir: 'down', color: 'var(--loss)', label: t('marker_sell', '卖出') },
+        ];
+        const legendHtml = PLEGEND
+          .filter(function (def) { return legendActions.has(def.action); })
+          .map(function (def) {
+            return '<span class="legend-item">' +
+              '<svg width="12" height="10" viewBox="0 0 12 10"><polygon points="' +
+              (def.dir === 'up' ? '6,1 1,9 11,9' : '6,9 1,1 11,1') +
+              '" fill="' + def.color + '" /></svg>' +
+              escapeHtml(def.label) + '</span>';
+          }).join('');
+        return (
+          '<article class="module tv-chart-card ' + span + '" data-module="' + idx + '">' +
+            titleHtml +
+            '<div class="tv-chart-area" id="module-host-' + idx + '"></div>' +
+            (legendHtml ? '<div class="chart-controls"><div class="toggle-row"><span class="legend-divider"></span>' + legendHtml + '</div></div>' : '') +
           '</article>'
         );
       }
@@ -1392,14 +1585,58 @@
       );
     }
 
+    // ---------------- ZoomLink: X 轴缩放联动协调器 ----------------
+    // 按 group 维护「可见日期窗口」+ 订阅者列表。两个图表共用同一 group
+    // （如 "price_equity"）即可实现 X 轴缩放联动。窗口语义统一为日期字符串
+    // "YYYY-MM-DD"（字典序可直接比较），避免不同图表点数/覆盖不一致导致按索引错位。
+    const ZoomLink = (function () {
+      const groups = {};
+
+      // 归一化日期：可能带时间（如 "2024-01-05T00:00:00"），一律取前 10 位。
+      function normDate(d) {
+        if (d == null || d === '') return null;
+        return String(d).slice(0, 10);
+      }
+
+      return {
+        // 订阅一个图表：返回当前已发布的窗口 {dateStart, dateEnd}（尚未发布过则 null）
+        register: function (group, chartId, onChange) {
+          const g = groups[group] || (groups[group] = { dateStart: null, dateEnd: null, subs: [] });
+          g.subs.push({ chartId: chartId, onChange: onChange });
+          return g.dateStart && g.dateEnd ? { dateStart: g.dateStart, dateEnd: g.dateEnd } : null;
+        },
+
+        // 发布窗口：更新 group 状态并通知同组「其他」订阅者（跳过来源 chartId 防回环）。
+        // 若窗口与当前状态相同则直接返回（重复触发无害，进一步抑制 A→B→A 振荡）。
+        publish: function (group, chartId, dateStart, dateEnd) {
+          const g = groups[group];
+          if (!g) return;
+          const ds = normDate(dateStart);
+          const de = normDate(dateEnd);
+          if (g.dateStart === ds && g.dateEnd === de) return;
+          g.dateStart = ds;
+          g.dateEnd = de;
+          g.subs.forEach(function (sub) {
+            if (sub.chartId === chartId) return;
+            try { sub.onChange(g.dateStart, g.dateEnd); } catch (e) { console.error('ZoomLink onChange error:', e); }
+          });
+        },
+      };
+    })();
+
     // ---------------- chart engine: overview (equity + drawdown panes) ----------------
     function buildOverviewChart(host, module, idx) {
       const points = (module.points || []).filter(function (p) { return p && p.equity != null; });
       const toggles = module.toggles || [];
       const modes = module.modes || [];
+      // 缩放联动：module.zoom_group 非空才启用（事件研究等无该字段 → 行为完全不变）
+      const zoomGroup = module.zoom_group || null;
+      const chartId = 'overview-' + idx;
 
       const wrap = document.createElement('div');
-      wrap.className = 'chart-shell';
+      // 启用缩放时复用 price-chart-shell 的 flex 布局（svg 区 + 底部控制条），
+      // 控件直接复用 .price-chart-controls/.price-reset-btn/.range-slider，不新增 CSS。
+      wrap.className = 'chart-shell' + (zoomGroup ? ' price-chart-shell' : '');
 
       const tooltip = document.createElement('div');
       tooltip.className = 'tooltip hidden';
@@ -1407,7 +1644,46 @@
 
       const svgNS = 'http://www.w3.org/2000/svg';
       const svg = document.createElementNS(svgNS, 'svg');
-      wrap.appendChild(svg);
+      let svgWrap = null;
+      if (zoomGroup) {
+        svgWrap = document.createElement('div');
+        svgWrap.className = 'price-svg-wrap';
+        svgWrap.appendChild(svg);
+        wrap.appendChild(svgWrap);
+      } else {
+        wrap.appendChild(svg);
+      }
+
+      // 底部缩放控制条（仅 zoomGroup 存在时创建；复用 K 线同款控件）
+      let controls = null, resetBtn = null, slider = null, track = null, fill = null, rangeStart = null, rangeEnd = null;
+      if (zoomGroup && points.length) {
+        controls = document.createElement('div');
+        controls.className = 'price-chart-controls';
+        resetBtn = document.createElement('button');
+        resetBtn.className = 'price-reset-btn';
+        resetBtn.textContent = t('price_reset', '重置');
+        slider = document.createElement('div');
+        slider.className = 'range-slider';
+        track = document.createElement('div');
+        track.className = 'range-track';
+        fill = document.createElement('div');
+        fill.className = 'range-fill';
+        rangeStart = document.createElement('input');
+        rangeStart.type = 'range';
+        rangeStart.className = 'range-start';
+        rangeStart.min = 0; rangeStart.max = Math.max(0, points.length - 1);
+        rangeEnd = document.createElement('input');
+        rangeEnd.type = 'range';
+        rangeEnd.className = 'range-end';
+        rangeEnd.min = 0; rangeEnd.max = Math.max(0, points.length - 1);
+        slider.appendChild(track);
+        slider.appendChild(fill);
+        slider.appendChild(rangeStart);
+        slider.appendChild(rangeEnd);
+        controls.appendChild(resetBtn);
+        controls.appendChild(slider);
+        wrap.appendChild(controls);
+      }
 
       host.appendChild(wrap);
 
@@ -1426,6 +1702,11 @@
       let showDrawdown = initialToggleState('drawdown', true);
       let showTrades = initialToggleState('trade', true);
       let firstRender = true;
+      // 可见日期窗口（字符串 "YYYY-MM-DD"，null = 全量）。仅 zoomGroup 启用时使用。
+      let viewDateStart = null;
+      let viewDateEnd = null;
+      // 图内左右留白常量提到函数级作用域，供 render 与滚轮/拖拽交互共用
+      const PAD_L = 16, PAD_R = 78;
 
       // overlay series: constructed once, visibility state persists across renders
       const overlaySeries = (module.overlay_series || []).map(function (s) {
@@ -1472,9 +1753,11 @@
       }
 
       function render() {
-        const W = wrap.clientWidth || 1200;
-        const H = wrap.clientHeight || 460;
-        const PAD_L = 16, PAD_R = 78;
+        // 启用缩放时 svg 放在 price-svg-wrap 内（flex 区），尺寸从 svgWrap 量，
+        // 避免把底部控制条高度算进绘图区；未启用时保持原 wrap 度量。
+        const sizeEl = (zoomGroup && svgWrap) ? svgWrap : wrap;
+        const W = sizeEl.clientWidth || 1200;
+        const H = sizeEl.clientHeight || 460;
         const TOP = 22;
         const X_AX_H = 36;
         const SEP = 14;
@@ -1498,6 +1781,21 @@
           svg.innerHTML = '<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#787b86" font-size="14">' + escapeHtml(t('empty_data', '暂无数据')) + '</text>';
           return;
         }
+
+        // 可见日期窗口 → 全量 points 索引区间 [visStart, visEnd]（闭区间）。
+        // 日期统一取前 10 位 "YYYY-MM-DD" 直接字典序比较；zoomGroup 为空时恒为全量。
+        let visStart = 0, visEnd = points.length - 1;
+        if (zoomGroup && points.length) {
+          if (viewDateStart) {
+            while (visStart <= visEnd && d10(points[visStart].date) < viewDateStart) visStart++;
+          }
+          if (viewDateEnd) {
+            while (visEnd >= visStart && d10(points[visEnd].date) > viewDateEnd) visEnd--;
+          }
+          if (visEnd < visStart) { visStart = 0; visEnd = points.length - 1; }
+        }
+        const vis = points.slice(visStart, visEnd + 1);
+        const n = vis.length;
 
         const computed = compute();
         const eqVals = computed.eqVals;
@@ -1535,9 +1833,10 @@
         const ddMax = 0;
 
         const N = points.length;
+        // X 坐标按「可见子集的序号」重算：i 为 vis 内的局部序号（0..n-1）
         const xPx = function (i) {
-          if (N === 1) return PAD_L + INNER_W / 2;
-          return PAD_L + (i / (N - 1)) * INNER_W;
+          if (n === 1) return PAD_L + INNER_W / 2;
+          return PAD_L + (i / (n - 1)) * INNER_W;
         };
         const eyPx = function (v) {
           return eqTop + (1 - (v - eqMin) / (eqMax - eqMin)) * EQ_H;
@@ -1586,7 +1885,8 @@
         }
 
         // ---- equity area + line
-        const eqLinePts = eqVals.map(function (v, i) { return [xPx(i), eyPx(v)]; });
+        const eqLinePts = [];
+        for (let j = 0; j < n; j++) { eqLinePts.push([xPx(j), eyPx(eqVals[visStart + j])]); }
         const gradId = 'eq-grad-' + idx;
         const defs = document.createElementNS(svgNS, 'defs');
         const grad = document.createElementNS(svgNS, 'linearGradient');
@@ -1611,7 +1911,7 @@
         const areaD =
           'M ' + eqLinePts[0][0] + ',' + eqBot + ' ' +
           eqLinePts.map(function (pt) { return 'L ' + pt[0] + ',' + pt[1]; }).join(' ') +
-          ' L ' + eqLinePts[N - 1][0] + ',' + eqBot + ' Z';
+          ' L ' + eqLinePts[n - 1][0] + ',' + eqBot + ' Z';
         const areaPath = document.createElementNS(svgNS, 'path');
         areaPath.setAttribute('d', areaD);
         areaPath.setAttribute('fill', 'url(#' + gradId + ')');
@@ -1632,9 +1932,10 @@
         var overlayPolylines = [];
         overlaySeries.forEach(function (s, sIdx) {
           var pts = [];
-          s.vals.forEach(function (v, i) {
-            if (v != null) pts.push(xPx(i) + ',' + eyPx(v));
-          });
+          for (var j = 0; j < n; j++) {
+            var ov = s.vals[visStart + j];
+            if (ov != null) pts.push(xPx(j) + ',' + eyPx(ov));
+          }
           if (pts.length < 2) return;
           var poly = document.createElementNS(svgNS, 'polyline');
           poly.setAttribute('points', pts.join(' '));
@@ -1685,12 +1986,13 @@
               var a = (m.action || '').toLowerCase();
               return a === 'buy' || a === 'short' || a === 'event';
             })
+            .filter(function (m) { return m._idx >= visStart && m._idx <= visEnd; })
             .slice()
             .sort(function (a, b) { return a._idx - b._idx; });
           const dateLaneEnds = Array(DATE_LABEL_LANES).fill(-Infinity);
           const eventLaneEnds = Array(EVENT_LABEL_LANES).fill(-Infinity);
           labeledMarkersSorted.forEach(function (m) {
-            var cx = eqLinePts[m._idx][0];
+            var cx = xPx(m._idx - visStart);
             if (labeledCount <= 30 && m.date) {
               var dateText = String(m.date).slice(5);
               var dateWidth = estimateLabelWidth(dateText, false);
@@ -1719,9 +2021,10 @@
           });
           markers.forEach(function (m) {
             const i = m._idx;
-            if (i < 0 || i >= eqLinePts.length) return;
-            const cx = eqLinePts[i][0];
-            const cy = eqLinePts[i][1];
+            if (i < visStart || i > visEnd) return;
+            const j = i - visStart;
+            const cx = xPx(j);
+            const cy = eyPx(eqVals[i]);
             const action = (m.action || '').toLowerCase();
             const isEvent = action === 'event';
             const isBullish = action === 'buy' || action === 'cover';
@@ -1897,7 +2200,8 @@
 
           // dd area
           const ddZeroY = dyPx(0);
-          const ddLinePts = ddVals.map(function (v, i) { return [xPx(i), dyPx(v)]; });
+          const ddLinePts = [];
+          for (let j = 0; j < n; j++) { ddLinePts.push([xPx(j), dyPx(ddVals[visStart + j])]); }
           const ddGradId = 'dd-grad-' + idx;
           const ddGrad = document.createElementNS(svgNS, 'linearGradient');
           ddGrad.setAttribute('id', ddGradId);
@@ -1920,7 +2224,7 @@
           const ddAreaD =
             'M ' + ddLinePts[0][0] + ',' + ddZeroY + ' ' +
             ddLinePts.map(function (pt) { return 'L ' + pt[0] + ',' + pt[1]; }).join(' ') +
-            ' L ' + ddLinePts[N - 1][0] + ',' + ddZeroY + ' Z';
+            ' L ' + ddLinePts[n - 1][0] + ',' + ddZeroY + ' Z';
           const ddArea = document.createElementNS(svgNS, 'path');
           ddArea.setAttribute('d', ddAreaD);
           ddArea.setAttribute('fill', 'url(#' + ddGradId + ')');
@@ -1940,9 +2244,9 @@
         // ---- x axis ticks (labels only)
         const tickCount = Math.max(4, Math.min(10, Math.round(W / 140)));
         for (let i = 0; i < tickCount; i++) {
-          const idx2 = Math.round((N - 1) * (i / Math.max(1, tickCount - 1)));
+          const idx2 = Math.round((n - 1) * (i / Math.max(1, tickCount - 1)));
           const x = xPx(idx2);
-          const lab = axisLabel(points[idx2]);
+          const lab = axisLabel(vis[idx2]);
           const t = document.createElementNS(svgNS, 'text');
           t.setAttribute('x', x);
           t.setAttribute('y', xAxisY + 16);
@@ -2072,9 +2376,10 @@
             return;
           }
           const ratio = (x - PAD_L) / INNER_W;
-          const i = Math.max(0, Math.min(N - 1, Math.round(ratio * (N - 1))));
+          const j = Math.max(0, Math.min(n - 1, Math.round(ratio * (n - 1))));
+          const i = visStart + j;
           const point = points[i];
-          const xCoord = xPx(i);
+          const xCoord = xPx(j);
           const eqV = eqVals[i];
           const ddV = ddVals[i];
           const eqYCoord = eyPx(eqV);
@@ -2134,6 +2439,145 @@
         }
         overlay.addEventListener('pointermove', onMove);
         overlay.addEventListener('pointerleave', onLeave);
+
+        syncSlider();
+      }
+
+      // ---------------- 缩放联动（仅 zoomGroup 启用；复用 K 线交互范式，窗口语义=日期） ----------------
+      // 日期归一化：统一 "YYYY-MM-DD" 前 10 位，字典序可直接比较
+      function d10(d) {
+        return String(d == null ? '' : d).slice(0, 10);
+      }
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+      // 当前可见日期窗口 → 全量 points 索引区间（闭区间）
+      function visibleRange() {
+        let s = 0, e = points.length - 1;
+        if (viewDateStart) {
+          while (s <= e && d10(points[s].date) < viewDateStart) s++;
+        }
+        if (viewDateEnd) {
+          while (e >= s && d10(points[e].date) > viewDateEnd) e--;
+        }
+        if (e < s) { s = 0; e = points.length - 1; }
+        return [s, e];
+      }
+
+      // 同步底部双滑块位置 + 高亮区间（与 K 线 syncSlider 同范式）
+      function syncSlider() {
+        if (!zoomGroup || !rangeStart || !rangeEnd || !fill || !points.length) return;
+        const r = visibleRange();
+        rangeStart.value = r[0];
+        rangeEnd.value = r[1];
+        const total = Math.max(1, points.length - 1);
+        const left = (r[0] / total) * 100;
+        const right = (r[1] / total) * 100;
+        fill.style.left = left + '%';
+        fill.style.width = Math.max(0, right - left) + '%';
+      }
+
+      // 把当前可见窗口发布给同组其他图表（K 线）。仅在用户交互/视图变化入口调用；
+      // onChange 回调内部不 publish，避免 A→B→A 无限回环。
+      function publishView() {
+        if (!zoomGroup || !points.length) return;
+        const r = visibleRange();
+        ZoomLink.publish(zoomGroup, chartId, d10(points[r[0]].date), d10(points[r[1]].date));
+      }
+
+      if (zoomGroup && points.length && svgWrap) {
+        // 滚轮缩放：以光标所在日期为锚点（与 K 线 MIN_SPAN=20 保底一致）
+        svgWrap.addEventListener('wheel', function (e) {
+          e.preventDefault();
+          const rect = svgWrap.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const INNER_W = Math.max(0, rect.width - PAD_L - PAD_R);
+          if (x < PAD_L || x > PAD_L + INNER_W) return;
+          const r = visibleRange();
+          const ratio = (x - PAD_L) / INNER_W;
+          const ci = clamp(Math.round(r[0] + ratio * (r[1] - r[0])), 0, points.length - 1);
+          const k = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+          const oldSpan = r[1] - r[0] + 1;
+          let span = Math.round(oldSpan / k);
+          span = clamp(span, 20, points.length);
+          let i0 = Math.round(ci - (ci - r[0]) / k);
+          i0 = clamp(i0, 0, points.length - span);
+          let i1 = i0 + span - 1;
+          if (i1 > points.length - 1) { i1 = points.length - 1; i0 = Math.max(0, i1 - span + 1); }
+          if (i0 < 0) { i0 = 0; i1 = Math.min(points.length - 1, span - 1); }
+          viewDateStart = d10(points[i0].date);
+          viewDateEnd = d10(points[i1].date);
+          syncSlider();
+          render();
+          publishView();
+        }, { passive: false });
+
+        // 拖拽平移：按像素位移换算日期
+        let dragging = false, startX = 0, startI0 = 0;
+        svgWrap.addEventListener('mousedown', function (e) {
+          dragging = true; startX = e.clientX; startI0 = visibleRange()[0];
+          svgWrap.style.cursor = 'grabbing';
+        });
+        window.addEventListener('mousemove', function (e) {
+          if (!dragging) return;
+          const rect = svgWrap.getBoundingClientRect();
+          const INNER_W = Math.max(0, rect.width - PAD_L - PAD_R);
+          const r = visibleRange();
+          const span = r[1] - r[0] + 1;
+          const pxPerBar = INNER_W / Math.max(1, span);
+          const dx = (e.clientX - startX) / pxPerBar;
+          const shift = Math.round(dx);
+          let i0 = clamp(startI0 + shift, 0, points.length - span);
+          const i1 = i0 + span - 1;
+          viewDateStart = d10(points[i0].date);
+          viewDateEnd = d10(points[i1].date);
+          syncSlider();
+          render();
+          publishView();
+        });
+        window.addEventListener('mouseup', function () {
+          if (dragging) { dragging = false; svgWrap.style.cursor = 'crosshair'; }
+        });
+
+        // 双滑块范围选择（值=全量索引，语义映射回日期）
+        rangeStart.addEventListener('input', function () {
+          let a = parseInt(rangeStart.value, 10), b = parseInt(rangeEnd.value, 10);
+          if (a > b) { a = b; rangeStart.value = a; }
+          viewDateStart = d10(points[a].date);
+          viewDateEnd = d10(points[b].date);
+          syncSlider();
+          render();
+          publishView();
+        });
+        rangeEnd.addEventListener('input', function () {
+          let a = parseInt(rangeStart.value, 10), b = parseInt(rangeEnd.value, 10);
+          if (b < a) { b = a; rangeEnd.value = b; }
+          viewDateStart = d10(points[a].date);
+          viewDateEnd = d10(points[b].date);
+          syncSlider();
+          render();
+          publishView();
+        });
+
+        // 重置：回到全量窗口
+        resetBtn.addEventListener('click', function () {
+          viewDateStart = null;
+          viewDateEnd = null;
+          syncSlider();
+          render();
+          publishView();
+        });
+
+        // 订阅 ZoomLink：若同组已有共享窗口则立即采纳，保证加载时两图对齐
+        const win = ZoomLink.register(zoomGroup, chartId, function (ds, de) {
+          viewDateStart = ds;
+          viewDateEnd = de;
+          syncSlider();
+          render();
+        });
+        if (win && win.dateStart && win.dateEnd) {
+          viewDateStart = win.dateStart;
+          viewDateEnd = win.dateEnd;
+        }
       }
 
       render();
@@ -2160,6 +2604,1154 @@
         },
         rerender: render,
       };
+    }
+
+    // ---------------- chart engine: combo (K线+成交量 上半 / 权益+回撤 下半, 共享X轴) ----------------
+    // 方案 B：单标的详情页把「权益曲线卡片」与「K线走势卡片」合并成一张组合图。
+    // 单 SVG、上下四个分面（K线 / 成交量 / 权益 / 回撤），ohlc 与 points 按日期并集对齐，
+    // 整图共享一套缩放状态机（滚轮/拖拽/双滑块/重置），X 轴始终对齐。不依赖 ZoomLink。
+    function buildComboChart(host, module, idx) {
+      const ohlcRaw = (module.ohlc || []).filter(function (d) {
+        return d && d.date && d.close != null;
+      });
+      const pointsRaw = (module.points || []).filter(function (p) {
+        return p && p.equity != null;
+      });
+      const toggles = module.toggles || [];
+      const modes = module.modes || [];
+      const markersRaw = module.markers || [];
+
+      // 合并日期轴：ohlc 与 points 的日期并集（统一取前 10 位 "YYYY-MM-DD"，字典序即时间序）。
+      // 两者天然共享交易日 X 轴；若 points 只覆盖回测窗口，前端以并集为基准、各自按 date 映射。
+      function d10(d) { return String(d == null ? '' : d).slice(0, 10); }
+      const dateSet = {};
+      const ohlcByDate = {};
+      const pointByDate = {};
+      ohlcRaw.forEach(function (d) { const k = d10(d.date); if (k) { dateSet[k] = true; ohlcByDate[k] = d; } });
+      pointsRaw.forEach(function (p) { const k = d10(p.date); if (k) { dateSet[k] = true; pointByDate[k] = p; } });
+      const axisDates = Object.keys(dateSet).sort();
+      const full = axisDates.length;
+
+      // markers → 合并日期轴索引（同一日期在上下分面 X 对齐）
+      const axisDateIndex = {};
+      axisDates.forEach(function (d, i) { axisDateIndex[d] = i; });
+      const markers = markersRaw
+        .map(function (m) {
+          const i = axisDateIndex[d10(m.date)];
+          if (i == null) return null;
+          return Object.assign({}, m, { _idx: i });
+        })
+        .filter(function (m) { return m !== null; });
+
+      const PAD_L = 16, PAD_R = 78, TOP = 18, X_AX_H = 30, SEP = 10;
+      const MIN_SPAN = 20;  // 最小可见点数（与 K 线一致，防缩到单根）
+      // viewRange = [i0, i1] 当前可见窗口在合并日期轴上的起止索引（含端点），整图共享
+      let viewRange = [0, Math.max(0, full - 1)];
+
+      const cs = getComputedStyle(ROOT);
+      const gainColor = cs.getPropertyValue('--gain').trim() || '#26a69a';
+      const lossColor = cs.getPropertyValue('--loss').trim() || '#ef5350';
+      const gridColor = cs.getPropertyValue('--grid').trim() || 'rgba(0,0,0,0.04)';
+      const mutedColor = cs.getPropertyValue('--muted').trim() || '#6a6d78';
+      const surfaceColor = cs.getPropertyValue('--surface-2').trim() || '#f3f5f9';
+      const borderColor = cs.getPropertyValue('--border-strong').trim() || '#d6dae3';
+      const bgColor = cs.getPropertyValue('--bg').trim() || '#ffffff';
+      const crosshairColor = cs.getPropertyValue('--crosshair').trim() || 'rgba(60,65,80,0.45)';
+
+      // 状态：回撤副图开关 / 权益显示模式 / 买卖点开关（与 overview_chart 同范式）
+      function initialToggleState(token, fallback) {
+        const found = toggles.find(function (tg) {
+          return String(tg.id || '').toLowerCase().indexOf(token) >= 0;
+        });
+        return found && typeof found.checked === 'boolean' ? found.checked : fallback;
+      }
+      function initialModeState() {
+        const active = modes.find(function (m) { return !!m.active; });
+        const id = String(active && active.id ? active.id : '').toLowerCase();
+        return id === 'absolute' ? 'absolute' : 'percentage';
+      }
+      let mode = initialModeState();
+      let showDrawdown = initialToggleState('drawdown', true);
+      let showTrades = initialToggleState('trade', true);
+
+      const wrap = document.createElement('div');
+      wrap.className = 'chart-shell price-chart-shell';
+      // 绘图区 500px：加上卡片标题+stats+底部控件，整卡高约 660px（620-680 目标区间）
+      wrap.style.height = '500px';
+
+      const svgNS = 'http://www.w3.org/2000/svg';
+      const svgWrap = document.createElement('div');
+      svgWrap.className = 'price-svg-wrap';
+      const svg = document.createElementNS(svgNS, 'svg');
+      svgWrap.appendChild(svg);
+      wrap.appendChild(svgWrap);
+
+      const tooltip = document.createElement('div');
+      tooltip.className = 'tooltip hidden';
+      wrap.appendChild(tooltip);
+
+      // 底部缩放控制条：重置按钮 + 双滑块（复用 K 线同款 .price-chart-controls/.price-reset-btn/.range-slider）
+      const controls = document.createElement('div');
+      controls.className = 'price-chart-controls';
+      const resetBtn = document.createElement('button');
+      resetBtn.className = 'price-reset-btn';
+      resetBtn.textContent = t('price_reset', '重置');
+      const slider = document.createElement('div');
+      slider.className = 'range-slider';
+      const track = document.createElement('div');
+      track.className = 'range-track';
+      const fill = document.createElement('div');
+      fill.className = 'range-fill';
+      const rangeStart = document.createElement('input');
+      rangeStart.type = 'range';
+      rangeStart.className = 'range-start';
+      rangeStart.min = 0; rangeStart.max = Math.max(0, full - 1);
+      const rangeEnd = document.createElement('input');
+      rangeEnd.type = 'range';
+      rangeEnd.className = 'range-end';
+      rangeEnd.min = 0; rangeEnd.max = Math.max(0, full - 1);
+      slider.appendChild(track);
+      slider.appendChild(fill);
+      slider.appendChild(rangeStart);
+      slider.appendChild(rangeEnd);
+      controls.appendChild(resetBtn);
+      controls.appendChild(slider);
+      wrap.appendChild(controls);
+
+      host.appendChild(wrap);
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function fmtVol(v) {
+        if (v == null || isNaN(v)) return t('price_no_vol', '成交量缺失');
+        var abs = Math.abs(v);
+        if (abs >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+        if (abs >= 1e4) return (v / 1e4).toFixed(2) + '万';
+        return nf(v, 0);
+      }
+      function svgEl(name) { return document.createElementNS(svgNS, name); }
+      function line(x1, y1, x2, y2, stroke, w) {
+        const l = svgEl('line');
+        l.setAttribute('x1', x1); l.setAttribute('y1', y1);
+        l.setAttribute('x2', x2); l.setAttribute('y2', y2);
+        l.setAttribute('stroke', stroke); l.setAttribute('stroke-width', w);
+        svg.appendChild(l); return l;
+      }
+      function text(x, y, str, anchor, fill, size, weight) {
+        const tnode = svgEl('text');
+        tnode.setAttribute('x', x); tnode.setAttribute('y', y);
+        tnode.setAttribute('text-anchor', anchor || 'start');
+        tnode.setAttribute('fill', fill); tnode.setAttribute('font-size', size || 11);
+        if (weight) tnode.setAttribute('font-weight', weight);
+        tnode.textContent = (str == null ? '' : String(str));
+        svg.appendChild(tnode); return tnode;
+      }
+      function rectEl(x, y, w, h, fill, opacity) {
+        const r = svgEl('rect');
+        r.setAttribute('x', x); r.setAttribute('y', y);
+        r.setAttribute('width', Math.max(0, w)); r.setAttribute('height', Math.max(0, h));
+        r.setAttribute('fill', fill);
+        if (opacity != null) r.setAttribute('fill-opacity', opacity);
+        svg.appendChild(r); return r;
+      }
+      function poly(points, fill, stroke, sw) {
+        const p = svgEl('polygon');
+        p.setAttribute('points', points.join(' '));
+        p.setAttribute('fill', fill);
+        if (stroke) {
+          p.setAttribute('stroke', stroke);
+          p.setAttribute('stroke-width', sw || 1);
+          p.setAttribute('stroke-linejoin', 'round');
+        }
+        svg.appendChild(p); return p;
+      }
+
+      // 权益/回撤计算（复用 overview compute() 语义）：
+      // 主权益线按显示模式（absolute/percentage），回撤恒按原始权益 peak-to-trough %。
+      // 合并轴上无 point 的日期（如价格数据长于回测窗口）记 null，绘制时跳过。
+      function computeEquity() {
+        let eqVals;
+        if (mode === 'percentage') {
+          const base = Number(pointsRaw[0] && pointsRaw[0].equity);
+          eqVals = axisDates.map(function (d) {
+            const p = pointByDate[d];
+            return p ? (base ? (Number(p.equity) / base - 1) * 100 : 0) : null;
+          });
+        } else {
+          eqVals = axisDates.map(function (d) {
+            const p = pointByDate[d];
+            return p ? Number(p.equity) : null;
+          });
+        }
+        let peak = -Infinity;
+        const ddVals = axisDates.map(function (d) {
+          const p = pointByDate[d];
+          if (!p) return null;
+          const eq = Number(p.equity);
+          peak = Math.max(peak, eq);
+          return peak === 0 ? 0 : (eq / peak - 1) * 100;
+        });
+        return { eqVals: eqVals, ddVals: ddVals };
+      }
+
+      function syncSlider() {
+        rangeStart.value = viewRange[0];
+        rangeEnd.value = viewRange[1];
+        const total = Math.max(1, full - 1);
+        const left = (viewRange[0] / total) * 100;
+        const right = (viewRange[1] / total) * 100;
+        fill.style.left = left + '%';
+        fill.style.width = Math.max(0, right - left) + '%';
+      }
+
+      function redraw() {
+        const rect = svgWrap.getBoundingClientRect();
+        const W = Math.max(320, rect.width || 1200);
+        const H = Math.max(240, rect.height || 460);
+        const INNER_W = W - PAD_L - PAD_R;
+
+        svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+        svg.setAttribute('width', W);
+        svg.setAttribute('height', H);
+        svg.innerHTML = '';
+
+        if (!full) {
+          svg.innerHTML = '<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#787b86" font-size="14">' +
+            escapeHtml(t('empty_data', '暂无数据')) + '</text>';
+          return;
+        }
+
+        let i0 = viewRange[0], i1 = viewRange[1];
+        if (i1 <= i0) i1 = Math.min(full - 1, i0 + 1);
+        const n = i1 - i0 + 1;
+
+        // 分面布局：K线 ~55% / 成交量 ~12% / 权益 ~22% / 回撤 ~11%（回撤隐藏时权益区不变，X 轴统一在最底部）
+        const avail = H - TOP - X_AX_H;
+        const paneAvail = avail - (showDrawdown ? 3 : 2) * SEP;
+        const priceH = paneAvail * 0.55;
+        const volH = paneAvail * 0.12;
+        const eqH = paneAvail * 0.22;
+        const ddH = showDrawdown ? paneAvail * 0.11 : 0;
+        const priceTop = TOP;
+        const priceBot = priceTop + priceH;
+        const volTop = priceBot + SEP;
+        const volBot = volTop + volH;
+        const eqTop = volBot + SEP;
+        const eqBot = eqTop + eqH;
+        const ddTop = eqBot + SEP;
+        const ddBot = ddTop + ddH;
+        const xAxisY = (showDrawdown ? ddBot : eqBot) + 6;
+
+        function xPx(j) {
+          if (n === 1) return PAD_L + INNER_W / 2;
+          return PAD_L + (j / (n - 1)) * INNER_W;
+        }
+
+        // ---- 可见窗口统计：价格/成交量/权益/回撤区间 ----
+        let pMin = Infinity, pMax = -Infinity, vMax = 0;
+        for (let j = 0; j < n; j++) {
+          const d = ohlcByDate[axisDates[i0 + j]];
+          if (!d) continue;
+          if (d.low != null) pMin = Math.min(pMin, d.low);
+          if (d.high != null) pMax = Math.max(pMax, d.high);
+          const v = d.volume;
+          if (v != null && !isNaN(v)) vMax = Math.max(vMax, v);
+        }
+        if (!isFinite(pMin)) { pMin = 0; pMax = 1; }
+        if (pMin === pMax) { pMin -= 1; pMax += 1; }
+        const pPad = (pMax - pMin) * 0.08;
+        pMin -= pPad; pMax += pPad;
+        if (vMax <= 0) vMax = 1;
+
+        const computed = computeEquity();
+        const eqVals = computed.eqVals;
+        const ddVals = computed.ddVals;
+        let eqMin = Infinity, eqMax = -Infinity;
+        for (let j = 0; j < n; j++) {
+          const v = eqVals[i0 + j];
+          if (v == null || !isFinite(v)) continue;
+          eqMin = Math.min(eqMin, v); eqMax = Math.max(eqMax, v);
+        }
+        if (!isFinite(eqMin)) { eqMin = 0; eqMax = 1; }
+        if (eqMin === eqMax) { eqMin -= 1; eqMax += 1; }
+        const ePad = (eqMax - eqMin) * 0.10;
+        eqMin -= ePad * 0.6; eqMax += ePad * 0.4;
+        let ddMin = 0;
+        for (let j = 0; j < n; j++) {
+          const v = ddVals[i0 + j];
+          if (v == null || !isFinite(v)) continue;
+          ddMin = Math.min(ddMin, v);
+        }
+        if (ddMin === 0) ddMin = -1;
+        const ddMax = 0;
+
+        function yPx(v) { return priceTop + (1 - (v - pMin) / (pMax - pMin)) * priceH; }
+        function yVol(v) { return volBot - (v / vMax) * volH; }
+        function eyPx(v) { return eqTop + (1 - (v - eqMin) / (eqMax - eqMin)) * eqH; }
+        function dyPx(v) { return ddTop + (1 - (v - ddMin) / (ddMax - ddMin)) * ddH; }
+
+        const barW = Math.max(1, (INNER_W / n) * 0.7);
+
+        // ---- 分面分隔线（上下分面之间细分隔，X 轴统一在最底部） ----
+        line(PAD_L, volTop - SEP / 2, PAD_L + INNER_W, volTop - SEP / 2, gridColor, 1);
+        line(PAD_L, eqTop - SEP / 2, PAD_L + INNER_W, eqTop - SEP / 2, gridColor, 1);
+        if (showDrawdown) line(PAD_L, ddTop - SEP / 2, PAD_L + INNER_W, ddTop - SEP / 2, gridColor, 1);
+
+        // ---- 上半区：价格网格 + K 线蜡烛（涨 --gain / 跌 --loss，复用 price_chart 逻辑） ----
+        const steps = 5;
+        for (let i = 0; i <= steps; i++) {
+          const y = priceTop + (i / steps) * priceH;
+          line(PAD_L, y, PAD_L + INNER_W, y, gridColor, 1);
+          const val = pMax - (i / steps) * (pMax - pMin);
+          text(W - 10, y + 4, nf(val, 2), 'end', mutedColor, 11);
+        }
+        for (let j = 0; j < n; j++) {
+          const d = ohlcByDate[axisDates[i0 + j]];
+          if (!d) continue;
+          const x = xPx(j);
+          const up = d.close >= d.open;
+          const c = up ? gainColor : lossColor;
+          const yh = yPx(d.high), yl = yPx(d.low);
+          const yo = yPx(d.open), yc = yPx(d.close);
+          line(x, yh, x, yl, c, 1);  // 影线
+          const top = Math.min(yo, yc), bot = Math.max(yo, yc);
+          rectEl(x - barW / 2, top, barW, Math.max(1, bot - top), c);
+        }
+
+        // ---- 上半区：成交量副图（K线下方紧贴） ----
+        text(PAD_L + 8, volTop + 14, t('price_volume', '成交量'), mutedColor, 10, 'start', true);
+        text(W - 10, volTop + 14, fmtVol(vMax), 'end', mutedColor, 10);
+        for (let j = 0; j < n; j++) {
+          const d = ohlcByDate[axisDates[i0 + j]];
+          if (!d || d.volume == null || isNaN(d.volume)) continue;
+          const x = xPx(j);
+          const up = d.close >= d.open;
+          const c = up ? gainColor : lossColor;
+          const yTop = yVol(d.volume);
+          rectEl(x - barW / 2, yTop, barW, Math.max(1, volBot - yTop), c, 0.55);
+        }
+
+        // ---- 下半区：权益曲线 + 面积渐变（mode 支持 absolute/percentage） ----
+        const eqLinePts = [];
+        for (let j = 0; j < n; j++) {
+          const v = eqVals[i0 + j];
+          if (v == null || !isFinite(v)) continue;
+          eqLinePts.push([xPx(j), eyPx(v)]);
+        }
+        if (eqLinePts.length >= 2) {
+          const eqStart = eqVals[i0], eqEnd = eqVals[i1];
+          const isUp = (eqStart != null && eqEnd != null) ? eqEnd >= eqStart : true;
+          const eqColor = isUp ? gainColor : lossColor;
+          const gradId = 'combo-eq-grad-' + idx;
+          const defs = svgEl('defs');
+          const grad = svgEl('linearGradient');
+          grad.setAttribute('id', gradId);
+          grad.setAttribute('x1', '0'); grad.setAttribute('y1', '0');
+          grad.setAttribute('x2', '0'); grad.setAttribute('y2', '1');
+          const stop1 = svgEl('stop');
+          stop1.setAttribute('offset', '0%');
+          stop1.setAttribute('stop-color', eqColor);
+          stop1.setAttribute('stop-opacity', '0.34');
+          const stop2 = svgEl('stop');
+          stop2.setAttribute('offset', '100%');
+          stop2.setAttribute('stop-color', eqColor);
+          stop2.setAttribute('stop-opacity', '0');
+          grad.appendChild(stop1);
+          grad.appendChild(stop2);
+          defs.appendChild(grad);
+          svg.appendChild(defs);
+
+          const areaD = 'M ' + eqLinePts[0][0] + ',' + eqBot + ' ' +
+            eqLinePts.map(function (pt) { return 'L ' + pt[0] + ',' + pt[1]; }).join(' ') +
+            ' L ' + eqLinePts[eqLinePts.length - 1][0] + ',' + eqBot + ' Z';
+          const areaPath = svgEl('path');
+          areaPath.setAttribute('d', areaD);
+          areaPath.setAttribute('fill', 'url(#' + gradId + ')');
+          svg.appendChild(areaPath);
+
+          const linePoly = svgEl('polyline');
+          linePoly.setAttribute('points', eqLinePts.map(function (pt) { return pt[0] + ',' + pt[1]; }).join(' '));
+          linePoly.setAttribute('fill', 'none');
+          linePoly.setAttribute('stroke', eqColor);
+          linePoly.setAttribute('stroke-width', '1.8');
+          linePoly.setAttribute('stroke-linecap', 'round');
+          linePoly.setAttribute('stroke-linejoin', 'round');
+          svg.appendChild(linePoly);
+
+          // 权益网格 + y 标签（5 步，与 overview_chart 对齐）
+          for (let i = 0; i <= steps; i++) {
+            const y = eqTop + (i / steps) * eqH;
+            line(PAD_L, y, PAD_L + INNER_W, y, gridColor, 1);
+            const val = eqMax - (i / steps) * (eqMax - eqMin);
+            text(W - 10, y + 4, nf(val, 2) + (mode === 'percentage' ? '%' : ''), 'end', mutedColor, 11);
+          }
+        }
+
+        // ---- 下半区：回撤副图（toggle 控制，恒按原始权益 peak-to-trough %） ----
+        if (showDrawdown && ddH > 0) {
+          for (let i = 0; i <= 2; i++) {
+            const y = ddTop + (i / 2) * ddH;
+            line(PAD_L, y, PAD_L + INNER_W, y, gridColor, 1);
+            const val = ddMax - (i / 2) * (ddMax - ddMin);
+            text(W - 10, y + 4, nf(val, 1) + '%', 'end', mutedColor, 10);
+          }
+          text(PAD_L + 8, ddTop + 14, t('drawdown_pane', 'DRAWDOWN'), mutedColor, 10, 'start', true);
+          const ddLinePts = [];
+          for (let j = 0; j < n; j++) {
+            const v = ddVals[i0 + j];
+            if (v == null || !isFinite(v)) continue;
+            ddLinePts.push([xPx(j), dyPx(v)]);
+          }
+          if (ddLinePts.length >= 2) {
+            const ddZeroY = dyPx(0);
+            const ddAreaD = 'M ' + ddLinePts[0][0] + ',' + ddZeroY + ' ' +
+              ddLinePts.map(function (pt) { return 'L ' + pt[0] + ',' + pt[1]; }).join(' ') +
+              ' L ' + ddLinePts[ddLinePts.length - 1][0] + ',' + ddZeroY + ' Z';
+            const ddArea = svgEl('path');
+            ddArea.setAttribute('d', ddAreaD);
+            ddArea.setAttribute('fill', lossColor);
+            ddArea.setAttribute('fill-opacity', '0.18');
+            svg.appendChild(ddArea);
+            const ddLine = svgEl('polyline');
+            ddLine.setAttribute('points', ddLinePts.map(function (pt) { return pt[0] + ',' + pt[1]; }).join(' '));
+            ddLine.setAttribute('fill', 'none');
+            ddLine.setAttribute('stroke', lossColor);
+            ddLine.setAttribute('stroke-width', '1.2');
+            ddLine.setAttribute('stroke-linecap', 'round');
+            svg.appendChild(ddLine);
+          }
+        }
+
+        // ---- 买卖点：上半区画在 K 线 close 处，下半区画在权益曲线上（同一日期、同一 X） ----
+        if (showTrades) {
+          markers.forEach(function (m) {
+            const gi = m._idx;
+            if (gi < i0 || gi > i1) return;
+            const j = gi - i0;
+            const x = xPx(j);
+            const action = (m.action || '').toLowerCase();
+            const isBuy = action === 'buy' || action === 'cover';
+            const c = isBuy ? gainColor : lossColor;
+            const SIZE = 6, OFF = 11;
+            const d = ohlcByDate[axisDates[gi]];
+            const closeV = d ? Number(d.close) : null;
+            if (closeV != null && isFinite(closeV)) {
+              const y = yPx(closeV);
+              const apexY = isBuy ? y + OFF : y - OFF;
+              const flareY = isBuy ? y + OFF + SIZE * 1.7 : y - OFF - SIZE * 1.7;
+              const tri = poly([x + ',' + apexY, (x - SIZE) + ',' + flareY, (x + SIZE) + ',' + flareY], c, bgColor, 1.2);
+              tri.style.pointerEvents = 'auto';
+              tri.style.cursor = 'pointer';
+              tri._marker = m;
+              tri._gi = gi;
+              tri.addEventListener('pointerenter', function () { showMarkerTooltip(m, gi, x, y); });
+              tri.addEventListener('pointerleave', function () { tooltip.classList.add('hidden'); });
+            }
+            const pt = pointByDate[axisDates[gi]];
+            const eqV = pt ? eqVals[gi] : null;
+            if (eqV != null && isFinite(eqV)) {
+              const y2 = eyPx(eqV);
+              const apexY2 = isBuy ? y2 + OFF : y2 - OFF;
+              const flareY2 = isBuy ? y2 + OFF + SIZE * 1.7 : y2 - OFF - SIZE * 1.7;
+              const tri2 = poly([x + ',' + apexY2, (x - SIZE) + ',' + flareY2, (x + SIZE) + ',' + flareY2], c, bgColor, 1.2);
+              tri2.style.pointerEvents = 'auto';
+              tri2.style.cursor = 'pointer';
+              tri2._marker = m;
+              tri2._gi = gi;
+              tri2.addEventListener('pointerenter', function () { showMarkerTooltip(m, gi, x, y2); });
+              tri2.addEventListener('pointerleave', function () { tooltip.classList.add('hidden'); });
+            }
+          });
+        }
+
+        // ---- x 轴刻度（最底部，MM-DD） ----
+        const tickCount = Math.max(4, Math.min(10, Math.round(W / 140)));
+        for (let i = 0; i < tickCount; i++) {
+          const j = Math.round((n - 1) * (i / Math.max(1, tickCount - 1)));
+          const x = xPx(j);
+          const lab = String(axisDates[i0 + j]).slice(5);
+          text(x, xAxisY + 16, lab, 'middle', mutedColor, 11);
+        }
+
+        // ---- 十字光标 + hover tooltip（OHLC + 成交量 + 权益值） ----
+        const ch = svgEl('g');
+        ch.style.display = 'none';
+        ch.style.pointerEvents = 'none';
+        const chV = svgEl('line');
+        chV.setAttribute('y1', priceTop);
+        chV.setAttribute('y2', showDrawdown ? ddBot : eqBot);
+        chV.setAttribute('stroke', crosshairColor);
+        chV.setAttribute('stroke-width', '1');
+        chV.setAttribute('stroke-dasharray', '3 3');
+        ch.appendChild(chV);
+        svg.appendChild(ch);
+
+        const overlay = svgEl('rect');
+        overlay.setAttribute('x', PAD_L);
+        overlay.setAttribute('y', priceTop);
+        overlay.setAttribute('width', INNER_W);
+        overlay.setAttribute('height', (showDrawdown ? ddBot : eqBot) - priceTop);
+        overlay.setAttribute('fill', 'transparent');
+        overlay.style.cursor = 'crosshair';
+        svg.appendChild(overlay);
+
+        function showBarTooltip(clientX) {
+          const r = svgWrap.getBoundingClientRect();
+          const x = clientX - r.left;
+          if (x < PAD_L || x > PAD_L + INNER_W) {
+            ch.style.display = 'none'; tooltip.classList.add('hidden'); return;
+          }
+          const ratio = (x - PAD_L) / INNER_W;
+          const j = clamp(Math.round(ratio * (n - 1)), 0, n - 1);
+          const gi = i0 + j;
+          const date = axisDates[gi];
+          const cx = xPx(j);
+          ch.style.display = '';
+          chV.setAttribute('x1', cx); chV.setAttribute('x2', cx);
+
+          const d = ohlcByDate[date];
+          const pt = pointByDate[date];
+          let rows = '<div class="tooltip-date">' + escapeHtml(date) + '</div>';
+          if (d) {
+            rows += ttRow(t('price_open', '开'), nf(d.open, 2));
+            rows += ttRow(t('price_high', '高'), nf(d.high, 2));
+            rows += ttRow(t('price_low', '低'), nf(d.low, 2));
+            rows += ttRow(t('price_close', '收'), nf(d.close, 2));
+            rows += ttRow(t('price_volume', '成交量'),
+              d.volume != null && !isNaN(d.volume) ? fmtVol(d.volume) : t('price_no_vol', '成交量缺失'));
+          }
+          if (pt) {
+            rows += ttRow(t('tooltip_equity', '权益'), nf(Number(pt.equity), 2));
+            const baseEq = Number(pointsRaw[0] && pointsRaw[0].equity);
+            const ret = baseEq ? ((Number(pt.equity) / baseEq - 1) * 100) : 0;
+            rows += ttRow(t('tooltip_return', '收益'), signed(ret, 2, '%'));
+            if (showDrawdown && ddVals[gi] != null) {
+              rows += ttRow(t('tooltip_drawdown', '回撤'), nf(ddVals[gi], 2) + '%');
+            }
+          }
+          markers.forEach(function (m) {
+            if (m._idx !== gi) return;
+            const a = (m.action || '').toLowerCase();
+            const labels = {
+              buy: t('marker_buy', '买入'), sell: t('marker_sell', '卖出'),
+              cover: t('marker_cover', '平空'), short: t('marker_short', '做空'),
+            };
+            const al = labels[a] || a;
+            const isBuy = a === 'buy' || a === 'cover';
+            const c = isBuy ? gainColor : lossColor;
+            rows += ttRow(al, isBuy ? '▲' : '▼', c);
+            if (m.label) rows += ttRow(t('marker_label', '标签'), escapeHtml(String(m.label)));
+          });
+          tooltip.innerHTML = rows;
+          tooltip.classList.remove('hidden');
+          const shellRect = wrap.getBoundingClientRect();
+          const ttRect = tooltip.getBoundingClientRect();
+          const isLeft = (clientX - shellRect.left) > shellRect.width / 2;
+          tooltip.style.left = (isLeft ? 18 : Math.max(18, shellRect.width - ttRect.width - 18)) + 'px';
+          tooltip.style.top = '18px';
+        }
+        function showMarkerTooltip(m, gi, x, y) {
+          const a = (m.action || '').toLowerCase();
+          const labels = {
+            buy: t('marker_buy', '买入'), sell: t('marker_sell', '卖出'),
+            cover: t('marker_cover', '平空'), short: t('marker_short', '做空'),
+          };
+          const al = labels[a] || a;
+          const isBuy = a === 'buy' || a === 'cover';
+          const c = isBuy ? gainColor : lossColor;
+          let rows = '<div class="tooltip-date">' + escapeHtml(m.date) + '</div>';
+          rows += ttRow(al, isBuy ? '▲' : '▼', c);
+          if (m.label) rows += ttRow(t('marker_label', '标签'), escapeHtml(String(m.label)));
+          tooltip.innerHTML = rows;
+          tooltip.classList.remove('hidden');
+          const shellRect = wrap.getBoundingClientRect();
+          const ttRect = tooltip.getBoundingClientRect();
+          const isLeft = x > shellRect.width / 2;
+          tooltip.style.left = (isLeft ? 18 : Math.max(18, shellRect.width - ttRect.width - 18)) + 'px';
+          tooltip.style.top = '18px';
+        }
+        function ttRow(key, val, color) {
+          const colorStyle = color ? ' style="color:' + color + '"' : '';
+          return '<div class="tooltip-row"><span class="key" style="--swatch:' +
+            (color || mutedColor) + '">' + escapeHtml(String(key)) + '</span><span class="val"' +
+            colorStyle + '>' + escapeHtml(String(val)) + '</span></div>';
+        }
+
+        overlay.addEventListener('pointermove', function (e) { showBarTooltip(e.clientX); });
+        overlay.addEventListener('pointerleave', function () {
+          ch.style.display = 'none'; tooltip.classList.add('hidden');
+        });
+
+        syncSlider();
+      }
+
+      // ---------------- 缩放交互（整图共享：滚轮/拖拽/双滑块/重置，上下分面同步缩放） ----------------
+      // 滚轮缩放：以光标所在日期为锚点，MIN_SPAN=20 保底
+      svgWrap.addEventListener('wheel', function (e) {
+        e.preventDefault();
+        const rect = svgWrap.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const INNER_W = rect.width - PAD_L - PAD_R;
+        if (x < PAD_L || x > PAD_L + INNER_W) return;
+        const ratio = (x - PAD_L) / INNER_W;
+        const ci = clamp(Math.round(viewRange[0] + ratio * (viewRange[1] - viewRange[0])), 0, full - 1);
+        const k = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const oldSpan = viewRange[1] - viewRange[0];
+        let span = Math.round(oldSpan / k);
+        span = clamp(span, MIN_SPAN, full);
+        let i0 = Math.round(ci - (ci - viewRange[0]) / k);
+        i0 = clamp(i0, 0, full - span);
+        let i1 = i0 + span - 1;
+        if (i1 > full - 1) { i1 = full - 1; i0 = Math.max(0, i1 - span + 1); }
+        if (i0 < 0) { i0 = 0; i1 = Math.min(full - 1, span - 1); }
+        viewRange = [i0, i1];
+        redraw();
+      }, { passive: false });
+
+      // 拖拽平移
+      let dragging = false, startX = 0, startI0 = 0;
+      svgWrap.addEventListener('mousedown', function (e) {
+        dragging = true; startX = e.clientX; startI0 = viewRange[0];
+        svgWrap.style.cursor = 'grabbing';
+      });
+      window.addEventListener('mousemove', function (e) {
+        if (!dragging) return;
+        const rect = svgWrap.getBoundingClientRect();
+        const INNER_W = rect.width - PAD_L - PAD_R;
+        const n = viewRange[1] - viewRange[0] + 1;
+        const pxPerBar = INNER_W / Math.max(1, n);
+        const dx = (e.clientX - startX) / pxPerBar;
+        const shift = Math.round(dx);
+        const span = viewRange[1] - viewRange[0] + 1;
+        let i0 = clamp(startI0 + shift, 0, full - span);
+        viewRange = [i0, i0 + span - 1];
+        redraw();
+      });
+      window.addEventListener('mouseup', function () {
+        if (dragging) { dragging = false; svgWrap.style.cursor = 'crosshair'; }
+      });
+
+      // 双滑块范围选择（值=合并日期轴索引）
+      rangeStart.addEventListener('input', function () {
+        let a = parseInt(rangeStart.value, 10), b = parseInt(rangeEnd.value, 10);
+        if (a > b) { a = b; rangeStart.value = a; }
+        viewRange = [a, b]; redraw();
+      });
+      rangeEnd.addEventListener('input', function () {
+        let a = parseInt(rangeStart.value, 10), b = parseInt(rangeEnd.value, 10);
+        if (b < a) { b = a; rangeEnd.value = b; }
+        viewRange = [a, b]; redraw();
+      });
+
+      // 重置：回到全量窗口
+      resetBtn.addEventListener('click', function () {
+        viewRange = [0, Math.max(0, full - 1)];
+        redraw();
+      });
+
+      redraw();
+
+      // 宽度变化重绘（ResizeObserver 自动解绑，与其它图表同范式）
+      if (window.ResizeObserver) {
+        const ro = new ResizeObserver(function () { redraw(); });
+        ro.observe(svgWrap);
+      } else {
+        window.addEventListener('resize', redraw);
+      }
+
+      return {
+        setMode: function (m) { mode = m; redraw(); },
+        toggleDrawdown: function () { showDrawdown = !showDrawdown; redraw(); return showDrawdown; },
+        toggleTrades: function () { showTrades = !showTrades; redraw(); return showTrades; },
+        rerender: redraw,
+      };
+    }
+
+    // ---------------- chart engine: price chart (K线 + 成交量 + 缩放) ----------------
+    function buildPriceChart(host, module, idx) {
+      const ohlc = (module.ohlc || []).filter(function (d) {
+        return d && d.date && d.close != null;
+      });
+      const markersRaw = module.markers || [];
+      // 缩放联动：module.zoom_group 非空才注册到 ZoomLink；为空则行为完全不变
+      const zoomGroup = module.zoom_group || null;
+      const chartId = 'price-' + idx;
+
+      const PAD_L = 16, PAD_R = 78, TOP = 18, X_AX_H = 30, SEP = 14;
+      const MIN_SPAN = 20;  // 最小可见点数（防缩到单根）
+      const full = ohlc.length;
+      // viewRange = [i0, i1] 当前可见窗口在全量 ohlc 上的起止索引（含端点）
+      let viewRange = [0, Math.max(0, full - 1)];
+
+      const cs = getComputedStyle(ROOT);
+      const gainColor = cs.getPropertyValue('--gain').trim() || '#26a69a';
+      const lossColor = cs.getPropertyValue('--loss').trim() || '#ef5350';
+      const gridColor = cs.getPropertyValue('--grid').trim() || 'rgba(0,0,0,0.04)';
+      const mutedColor = cs.getPropertyValue('--muted').trim() || '#6a6d78';
+      const borderColor = cs.getPropertyValue('--border-strong').trim() || '#d6dae3';
+      const bgColor = cs.getPropertyValue('--bg').trim() || '#ffffff';
+      const crosshairColor = cs.getPropertyValue('--crosshair').trim() || 'rgba(60,65,80,0.45)';
+
+      const wrap = document.createElement('div');
+      wrap.className = 'chart-shell price-chart-shell';
+
+      const svgNS = 'http://www.w3.org/2000/svg';
+      const svgWrap = document.createElement('div');
+      svgWrap.className = 'price-svg-wrap';
+      const svg = document.createElementNS(svgNS, 'svg');
+      svgWrap.appendChild(svg);
+      wrap.appendChild(svgWrap);
+
+      const tooltip = document.createElement('div');
+      tooltip.className = 'tooltip hidden';
+      wrap.appendChild(tooltip);
+
+      // 底部控制条：重置按钮 + 双滑块范围选择
+      const controls = document.createElement('div');
+      controls.className = 'price-chart-controls';
+      const resetBtn = document.createElement('button');
+      resetBtn.className = 'price-reset-btn';
+      resetBtn.textContent = t('price_reset', '重置');
+      const slider = document.createElement('div');
+      slider.className = 'range-slider';
+      const track = document.createElement('div');
+      track.className = 'range-track';
+      const fill = document.createElement('div');
+      fill.className = 'range-fill';
+      const rangeStart = document.createElement('input');
+      rangeStart.type = 'range';
+      rangeStart.className = 'range-start';
+      rangeStart.min = 0; rangeStart.max = Math.max(0, full - 1);
+      const rangeEnd = document.createElement('input');
+      rangeEnd.type = 'range';
+      rangeEnd.className = 'range-end';
+      rangeEnd.min = 0; rangeEnd.max = Math.max(0, full - 1);
+      slider.appendChild(track);
+      slider.appendChild(fill);
+      slider.appendChild(rangeStart);
+      slider.appendChild(rangeEnd);
+      controls.appendChild(resetBtn);
+      controls.appendChild(slider);
+      wrap.appendChild(controls);
+
+      host.appendChild(wrap);
+
+      // 全量 date → index 映射，用于 markers 对齐
+      const dateIndex = {};
+      ohlc.forEach(function (d, i) { if (d && d.date) dateIndex[String(d.date)] = i; });
+      const markers = markersRaw
+        .map(function (m) {
+          const i = dateIndex[String(m.date)];
+          if (i == null) return null;
+          return Object.assign({}, m, { _idx: i });
+        })
+        .filter(function (m) { return m !== null; });
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function fmtVol(v) {
+        if (v == null || isNaN(v)) return t('price_no_vol', '成交量缺失');
+        var abs = Math.abs(v);
+        if (abs >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+        if (abs >= 1e4) return (v / 1e4).toFixed(2) + '万';
+        return nf(v, 0);
+      }
+      function svgEl(name) { return document.createElementNS(svgNS, name); }
+      function line(x1, y1, x2, y2, stroke, w) {
+        const l = svgEl('line');
+        l.setAttribute('x1', x1); l.setAttribute('y1', y1);
+        l.setAttribute('x2', x2); l.setAttribute('y2', y2);
+        l.setAttribute('stroke', stroke); l.setAttribute('stroke-width', w);
+        svg.appendChild(l); return l;
+      }
+      function text(x, y, str, anchor, fill, size, weight) {
+        const tnode = svgEl('text');
+        tnode.setAttribute('x', x); tnode.setAttribute('y', y);
+        tnode.setAttribute('text-anchor', anchor || 'start');
+        tnode.setAttribute('fill', fill); tnode.setAttribute('font-size', size || 11);
+        if (weight) tnode.setAttribute('font-weight', weight);
+        tnode.textContent = (str == null ? '' : String(str));
+        svg.appendChild(tnode); return tnode;
+      }
+      function rectEl(x, y, w, h, fill, opacity) {
+        const r = svgEl('rect');
+        r.setAttribute('x', x); r.setAttribute('y', y);
+        r.setAttribute('width', Math.max(0, w)); r.setAttribute('height', Math.max(0, h));
+        r.setAttribute('fill', fill);
+        if (opacity != null) r.setAttribute('fill-opacity', opacity);
+        svg.appendChild(r); return r;
+      }
+      function poly(points, fill, stroke, sw) {
+        const p = svgEl('polygon');
+        p.setAttribute('points', points.join(' '));
+        p.setAttribute('fill', fill);
+        if (stroke) {
+          p.setAttribute('stroke', stroke);
+          p.setAttribute('stroke-width', sw || 1);
+          p.setAttribute('stroke-linejoin', 'round');
+        }
+        svg.appendChild(p); return p;
+      }
+
+      function syncSlider() {
+        rangeStart.value = viewRange[0];
+        rangeEnd.value = viewRange[1];
+        const total = Math.max(1, full - 1);
+        const left = (viewRange[0] / total) * 100;
+        const right = (viewRange[1] / total) * 100;
+        fill.style.left = left + '%';
+        fill.style.width = Math.max(0, right - left) + '%';
+      }
+
+      // 收到 ZoomLink 的日期窗口后，换算回 ohlc 索引区间（二分/遍历找
+      // date>=dateStart 首索引、date<=dateEnd 末索引），clamp 到 [0, full-1]，
+      // span 保底 MIN_SPAN，避免缩到单根。
+      function applyDateWindow(dateStart, dateEnd) {
+        if (!full) return;
+        let i0 = 0, i1 = full - 1;
+        if (dateStart) {
+          for (let k = 0; k < full; k++) {
+            if (String(ohlc[k].date).slice(0, 10) >= dateStart) { i0 = k; break; }
+          }
+        }
+        if (dateEnd) {
+          for (let k = full - 1; k >= 0; k--) {
+            if (String(ohlc[k].date).slice(0, 10) <= dateEnd) { i1 = k; break; }
+          }
+        }
+        if (i1 < i0) i1 = i0;
+        if (i1 - i0 + 1 < MIN_SPAN) {
+          const mid = Math.round((i0 + i1) / 2);
+          let s0 = clamp(mid - Math.floor(MIN_SPAN / 2), 0, Math.max(0, full - MIN_SPAN));
+          i0 = s0; i1 = s0 + MIN_SPAN - 1;
+          if (i1 > full - 1) { i1 = full - 1; i0 = Math.max(0, i1 - MIN_SPAN + 1); }
+        }
+        viewRange = [clamp(i0, 0, full - 1), clamp(i1, 0, full - 1)];
+        redraw();
+      }
+
+      function redraw() {
+        const rect = svgWrap.getBoundingClientRect();
+        const W = Math.max(320, rect.width || 1200);
+        const H = Math.max(240, rect.height || 460);
+        const INNER_W = W - PAD_L - PAD_R;
+
+        if (full === 0) {
+          svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+          svg.innerHTML = '<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#787b86" font-size="14">' +
+            escapeHtml(t('empty_data', '暂无数据')) + '</text>';
+          return;
+        }
+
+        let i0 = viewRange[0], i1 = viewRange[1];
+        if (i1 <= i0) i1 = i0 + 1;
+        const vis = ohlc.slice(i0, i1 + 1);
+        const n = vis.length;
+        const avail = H - TOP - X_AX_H;
+        const priceH = avail * 0.72;
+        const volH = avail - priceH - SEP;
+        const priceTop = TOP, priceBot = priceTop + priceH;
+        const volTop = priceBot + SEP, volBot = volTop + volH;
+        const xAxisY = volBot + 6;
+
+        svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+        svg.setAttribute('width', W);
+        svg.setAttribute('height', H);
+        svg.innerHTML = '';
+
+        // 价格区间
+        let pMin = Infinity, pMax = -Infinity;
+        vis.forEach(function (d) {
+          if (d.low != null) pMin = Math.min(pMin, d.low);
+          if (d.high != null) pMax = Math.max(pMax, d.high);
+        });
+        if (!isFinite(pMin)) { pMin = 0; pMax = 1; }
+        if (pMin === pMax) { pMin -= 1; pMax += 1; }
+        const pPad = (pMax - pMin) * 0.08;
+        pMin -= pPad; pMax += pPad;
+
+        // 成交量区间
+        let vMax = 0;
+        vis.forEach(function (d) {
+          const v = d.volume;
+          if (v != null && !isNaN(v)) vMax = Math.max(vMax, v);
+        });
+        if (vMax <= 0) vMax = 1;
+
+        function xPx(j) {
+          if (n === 1) return PAD_L + INNER_W / 2;
+          return PAD_L + (j / (n - 1)) * INNER_W;
+        }
+        function yPx(v) { return priceTop + (1 - (v - pMin) / (pMax - pMin)) * priceH; }
+        function yVol(v) { return volBot - (v / vMax) * volH; }
+        const barW = Math.max(1, (INNER_W / n) * 0.7);
+
+        // ---- 价格网格 + y 轴标签 ----
+        const steps = 5;
+        for (let i = 0; i <= steps; i++) {
+          const y = priceTop + (i / steps) * priceH;
+          line(PAD_L, y, PAD_L + INNER_W, y, gridColor, 1);
+          const val = pMax - (i / steps) * (pMax - pMin);
+          text(W - 10, y + 4, nf(val, 2), 'end', mutedColor, 11);
+        }
+
+        // ---- 蜡烛实体 + 影线 ----
+        vis.forEach(function (d, j) {
+          const x = xPx(j);
+          const up = d.close >= d.open;
+          const c = up ? gainColor : lossColor;
+          const yh = yPx(d.high), yl = yPx(d.low);
+          const yo = yPx(d.open), yc = yPx(d.close);
+          line(x, yh, x, yl, c, 1);  // 影线
+          const top = Math.min(yo, yc), bot = Math.max(yo, yc);
+          rectEl(x - barW / 2, top, barW, Math.max(1, bot - top), c);
+        });
+
+        // ---- 成交量副图 ----
+        text(PAD_L + 8, volTop + 14, t('price_volume', '成交量'), mutedColor, 10, 'start', true);
+        text(W - 10, volTop + 14, fmtVol(vMax), 'end', mutedColor, 10);
+        const hasVol = vis.some(function (d) { return d.volume != null && !isNaN(d.volume); });
+        if (hasVol) {
+          vis.forEach(function (d, j) {
+            const v = d.volume;
+            if (v == null || isNaN(v)) return;
+            const x = xPx(j);
+            const up = d.close >= d.open;
+            const c = up ? gainColor : lossColor;
+            const yTop = yVol(v);
+            rectEl(x - barW / 2, yTop, barW, Math.max(1, volBot - yTop), c, 0.55);
+          });
+        } else {
+          text(PAD_L + INNER_W / 2, volTop + volH / 2,
+            t('price_no_vol_tip', '成交量数据缺失（旧缓存无 vol，请更新数据源后重跑）'),
+            'middle', mutedColor, 12);
+        }
+
+        // ---- 买卖点标记（窗口内；buy 向上三角/红，sell 向下三角/绿）----
+        markers.forEach(function (m) {
+          const gi = m._idx;
+          if (gi < i0 || gi > i1) return;
+          const j = gi - i0;
+          const x = xPx(j);
+          const d = ohlc[gi];
+          const y = yPx(d.close);
+          const action = (m.action || '').toLowerCase();
+          const isBuy = action === 'buy' || action === 'cover';
+          const c = isBuy ? gainColor : lossColor;
+          const SIZE = 6, OFF = 11;
+          const apexY = isBuy ? y + OFF : y - OFF;
+          const flareY = isBuy ? y + OFF + SIZE * 1.7 : y - OFF - SIZE * 1.7;
+          const tri = poly(
+            [x + ',' + apexY, (x - SIZE) + ',' + flareY, (x + SIZE) + ',' + flareY],
+            c, bgColor, 1.2
+          );
+          tri.style.pointerEvents = 'auto';
+          tri.style.cursor = 'pointer';
+          tri._marker = m;
+          tri._gi = gi;
+          tri.addEventListener('pointerenter', function () { showMarkerTooltip(m, gi, x, y); });
+          tri.addEventListener('pointerleave', function () {
+            tooltip.classList.add('hidden');
+          });
+        });
+
+        // ---- x 轴刻度 ----
+        const tickCount = Math.max(4, Math.min(10, Math.round(W / 140)));
+        for (let i = 0; i < tickCount; i++) {
+          const j = Math.round((n - 1) * (i / Math.max(1, tickCount - 1)));
+          const x = xPx(j);
+          const lab = vis[j].date ? String(vis[j].date).slice(5) : '';
+          text(x, xAxisY + 16, lab, 'middle', mutedColor, 11);
+        }
+
+        // ---- 十字光标 + hover tooltip ----
+        const ch = svgEl('g');
+        ch.style.display = 'none';
+        ch.style.pointerEvents = 'none';
+        const chV = svgEl('line');
+        chV.setAttribute('y1', priceTop);
+        chV.setAttribute('y2', volBot);
+        chV.setAttribute('stroke', crosshairColor);
+        chV.setAttribute('stroke-width', '1');
+        chV.setAttribute('stroke-dasharray', '3 3');
+        ch.appendChild(chV);
+        svg.appendChild(ch);
+
+        const overlay = svgEl('rect');
+        overlay.setAttribute('x', PAD_L);
+        overlay.setAttribute('y', priceTop);
+        overlay.setAttribute('width', INNER_W);
+        overlay.setAttribute('height', volBot - priceTop);
+        overlay.setAttribute('fill', 'transparent');
+        overlay.style.cursor = 'crosshair';
+        svg.appendChild(overlay);
+
+        function showBarTooltip(clientX) {
+          const r = svgWrap.getBoundingClientRect();
+          const x = clientX - r.left;
+          if (x < PAD_L || x > PAD_L + INNER_W) {
+            ch.style.display = 'none'; tooltip.classList.add('hidden'); return;
+          }
+          const ratio = (x - PAD_L) / INNER_W;
+          const j = clamp(Math.round(ratio * (n - 1)), 0, n - 1);
+          const d = vis[j];
+          const gi = i0 + j;
+          const cx = xPx(j);
+          ch.style.display = '';
+          chV.setAttribute('x1', cx); chV.setAttribute('x2', cx);
+
+          let rows = '<div class="tooltip-date">' + escapeHtml(d.date) + '</div>';
+          rows += ttRow(t('price_open', '开'), nf(d.open, 2));
+          rows += ttRow(t('price_high', '高'), nf(d.high, 2));
+          rows += ttRow(t('price_low', '低'), nf(d.low, 2));
+          rows += ttRow(t('price_close', '收'), nf(d.close, 2));
+          rows += ttRow(t('price_volume', '成交量'),
+            d.volume != null && !isNaN(d.volume) ? fmtVol(d.volume) : t('price_no_vol', '成交量缺失'));
+          markers.forEach(function (m) {
+            if (m._idx !== gi) return;
+            const a = (m.action || '').toLowerCase();
+            const labels = {
+              buy: t('marker_buy', '买入'), sell: t('marker_sell', '卖出'),
+              cover: t('marker_cover', '平空'), short: t('marker_short', '做空'),
+            };
+            const al = labels[a] || a;
+            const isBuy = a === 'buy' || a === 'cover';
+            const c = isBuy ? gainColor : lossColor;
+            rows += ttRow(al, isBuy ? '▲' : '▼', c);
+            if (m.label) rows += ttRow(t('marker_label', '标签'), escapeHtml(String(m.label)));
+          });
+          tooltip.innerHTML = rows;
+          tooltip.classList.remove('hidden');
+          const shellRect = wrap.getBoundingClientRect();
+          const ttRect = tooltip.getBoundingClientRect();
+          const isLeft = (clientX - shellRect.left) > shellRect.width / 2;
+          tooltip.style.left = (isLeft ? 18 : Math.max(18, shellRect.width - ttRect.width - 18)) + 'px';
+          tooltip.style.top = '18px';
+        }
+        function showMarkerTooltip(m, gi, x, y) {
+          const a = (m.action || '').toLowerCase();
+          const labels = {
+            buy: t('marker_buy', '买入'), sell: t('marker_sell', '卖出'),
+            cover: t('marker_cover', '平空'), short: t('marker_short', '做空'),
+          };
+          const al = labels[a] || a;
+          const isBuy = a === 'buy' || a === 'cover';
+          const c = isBuy ? gainColor : lossColor;
+          let rows = '<div class="tooltip-date">' + escapeHtml(m.date) + '</div>';
+          rows += ttRow(al, isBuy ? '▲' : '▼', c);
+          if (m.label) rows += ttRow(t('marker_label', '标签'), escapeHtml(String(m.label)));
+          tooltip.innerHTML = rows;
+          tooltip.classList.remove('hidden');
+          const shellRect = wrap.getBoundingClientRect();
+          const ttRect = tooltip.getBoundingClientRect();
+          const isLeft = x > shellRect.width / 2;
+          tooltip.style.left = (isLeft ? 18 : Math.max(18, shellRect.width - ttRect.width - 18)) + 'px';
+          tooltip.style.top = '18px';
+        }
+        function ttRow(key, val, color) {
+          const colorStyle = color ? ' style="color:' + color + '"' : '';
+          return '<div class="tooltip-row"><span class="key" style="--swatch:' +
+            (color || mutedColor) + '">' + escapeHtml(String(key)) + '</span><span class="val"' +
+            colorStyle + '>' + escapeHtml(String(val)) + '</span></div>';
+        }
+
+        overlay.addEventListener('pointermove', function (e) { showBarTooltip(e.clientX); });
+        overlay.addEventListener('pointerleave', function () {
+          ch.style.display = 'none'; tooltip.classList.add('hidden');
+        });
+
+        syncSlider();
+
+        // 发布当前可见日期窗口给同组其他图表（ZoomLink.publish 内部跳过来源 chartId 防回环）
+        if (zoomGroup && full) {
+          ZoomLink.publish(zoomGroup, chartId,
+            String(ohlc[viewRange[0]].date).slice(0, 10),
+            String(ohlc[viewRange[1]].date).slice(0, 10));
+        }
+      }
+
+      // ---------------- 缩放交互 ----------------
+      // 滚轮缩放（以光标所在 bar 为锚点）
+      svgWrap.addEventListener('wheel', function (e) {
+        e.preventDefault();
+        const rect = svgWrap.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const INNER_W = rect.width - PAD_L - PAD_R;
+        if (x < PAD_L || x > PAD_L + INNER_W) return;
+        const ratio = (x - PAD_L) / INNER_W;
+        const ci = clamp(Math.round(viewRange[0] + ratio * (viewRange[1] - viewRange[0])), 0, full - 1);
+        const k = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const oldSpan = viewRange[1] - viewRange[0];
+        let span = Math.round(oldSpan / k);
+        span = clamp(span, MIN_SPAN, full);
+        let i0 = Math.round(ci - (ci - viewRange[0]) / k);
+        i0 = clamp(i0, 0, full - span);
+        let i1 = i0 + span - 1;
+        if (i1 > full - 1) { i1 = full - 1; i0 = Math.max(0, i1 - span + 1); }
+        if (i0 < 0) { i0 = 0; i1 = Math.min(full - 1, span - 1); }
+        viewRange = [i0, i1];
+        redraw();
+      }, { passive: false });
+
+      // 拖拽平移
+      let dragging = false, startX = 0, startI0 = 0;
+      svgWrap.addEventListener('mousedown', function (e) {
+        dragging = true; startX = e.clientX; startI0 = viewRange[0];
+        svgWrap.style.cursor = 'grabbing';
+      });
+      window.addEventListener('mousemove', function (e) {
+        if (!dragging) return;
+        const rect = svgWrap.getBoundingClientRect();
+        const INNER_W = rect.width - PAD_L - PAD_R;
+        const n = viewRange[1] - viewRange[0] + 1;
+        const pxPerBar = INNER_W / Math.max(1, n);
+        const dx = (e.clientX - startX) / pxPerBar;
+        const shift = Math.round(dx);
+        const span = viewRange[1] - viewRange[0] + 1;
+        let i0 = clamp(startI0 + shift, 0, full - span);
+        viewRange = [i0, i0 + span - 1];
+        redraw();
+      });
+      window.addEventListener('mouseup', function () {
+        if (dragging) { dragging = false; svgWrap.style.cursor = 'crosshair'; }
+      });
+
+      // 双滑块范围选择
+      rangeStart.addEventListener('input', function () {
+        let a = parseInt(rangeStart.value, 10), b = parseInt(rangeEnd.value, 10);
+        if (a > b) { a = b; rangeStart.value = a; }
+        viewRange = [a, b]; redraw();
+      });
+      rangeEnd.addEventListener('input', function () {
+        let a = parseInt(rangeStart.value, 10), b = parseInt(rangeEnd.value, 10);
+        if (b < a) { b = a; rangeEnd.value = b; }
+        viewRange = [a, b]; redraw();
+      });
+
+      // 重置
+      resetBtn.addEventListener('click', function () {
+        viewRange = [0, Math.max(0, full - 1)];
+        redraw();
+      });
+
+      // 订阅 ZoomLink：收到同组图表发布的日期窗口 → 换算回索引并重绘；
+      // 若同组已有共享窗口则立即采纳（加载时两图对齐）。
+      if (zoomGroup && full) {
+        const win = ZoomLink.register(zoomGroup, chartId, function (dateStart, dateEnd) {
+          applyDateWindow(dateStart, dateEnd);
+        });
+        if (win && win.dateStart && win.dateEnd) {
+          applyDateWindow(win.dateStart, win.dateEnd);
+        }
+      }
+
+      redraw();
+
+      // 宽度变化重绘（与 overview_chart 同范式，避免内存泄漏：ResizeObserver 自动解绑）
+      if (window.ResizeObserver) {
+        const ro = new ResizeObserver(function () { redraw(); });
+        ro.observe(svgWrap);
+      } else {
+        window.addEventListener('resize', redraw);
+      }
     }
 
     // ---------------- chart engine: multi-line ----------------
@@ -2566,9 +4158,46 @@
               chart.setMode(id === 'percentage' ? 'percentage' : 'absolute');
             });
           });
+        } else if (module.type === 'combo_chart') {
+          const host = document.getElementById('module-host-' + idx);
+          if (!host) return;
+          const chart = buildComboChart(host, module, idx);
+
+          const moduleEl = document.querySelector('[data-module="' + idx + '"]');
+          if (!moduleEl) return;
+
+          // toggles（drawdown 回撤副图 / trades 买卖点，与 overview_chart 同范式）
+          moduleEl.querySelectorAll('.toggle-item').forEach(function (el) {
+            el.addEventListener('click', function () {
+              const id = (el.getAttribute('data-toggle') || '').toLowerCase();
+              if (id.indexOf('drawdown') >= 0) {
+                const visible = chart.toggleDrawdown();
+                el.classList.toggle('muted', !visible);
+              } else if (id.indexOf('trade') >= 0) {
+                const visible = chart.toggleTrades();
+                el.classList.toggle('muted', !visible);
+              } else {
+                el.classList.toggle('muted');
+              }
+            });
+          });
+
+          // mode switch（absolute / percentage）
+          const modeEls = moduleEl.querySelectorAll('.mode-chip');
+          modeEls.forEach(function (el) {
+            el.addEventListener('click', function () {
+              modeEls.forEach(function (m) { m.classList.remove('active'); });
+              el.classList.add('active');
+              const id = (el.getAttribute('data-mode') || '').toLowerCase();
+              chart.setMode(id === 'percentage' ? 'percentage' : 'absolute');
+            });
+          });
         } else if (module.type === 'line_chart') {
           const host = document.getElementById('module-host-' + idx);
           if (host) buildMultiLineChart(host, module, idx);
+        } else if (module.type === 'price_chart') {
+          const host = document.getElementById('module-host-' + idx);
+          if (host) buildPriceChart(host, module, idx);
         } else if (module.type === 'custom_html') {
           const host = document.getElementById('module-host-' + idx);
           if (!host) return;

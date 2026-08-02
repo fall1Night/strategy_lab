@@ -1,0 +1,64 @@
+classDiagram
+    %% ===== 存储层（schema.py） =====
+    class BacktestRun {
+        +String run_id   PK
+        +String symbol
+        +Date start
+        +Date end
+        +String params_json
+        +List~PricePoint~ price
+        +List~EquityPoint~ equity
+    }
+    class PricePoint {
+        +int id           PK autoincrement
+        +String run_id    FK -> backtest_runs.run_id
+        +Date date        index
+        +Numeric(18,4) open
+        +Numeric(18,4) high
+        +Numeric(18,4) low
+        +Numeric(18,4) close
+        +Numeric(18,4) volume
+    }
+    class EquityPoint {
+        +int id           PK
+        +String run_id    FK
+        +Date date
+        +Numeric(18,4) value
+    }
+    BacktestRun "1" *-- "0..*" PricePoint : cascade delete-orphan
+    BacktestRun "1" *-- "0..*" EquityPoint : cascade delete-orphan
+
+    %% ===== run_symbol 返回 / db_row_to_result 产出的内存结构 =====
+    class RunResult {
+        +str symbol
+        +str run_id
+        +list price_curve
+        +list equity_curve
+        +list trade_history
+    }
+    class PriceCurvePoint {
+        +str date      YYYY-MM-DD
+        +float open
+        +float high
+        +float low
+        +float close
+        +float volume  可为 null（旧缓存无成交量）
+    }
+    RunResult "1" *-- "0..*" PriceCurvePoint : price_curve
+
+    %% ===== 注入模板的 price_chart 模块契约 =====
+    class PriceChartModule {
+        +str type = "price_chart"
+        +str tab = "overview"
+        +str title
+        +str subtitle
+        +list ohlc
+        +list markers
+    }
+    class PriceMarker {
+        +str date      YYYY-MM-DD
+        +str action    buy / sell
+        +str label
+    }
+    PriceChartModule "1" *-- "0..*" PriceCurvePoint : ohlc
+    PriceChartModule "1" *-- "0..*" PriceMarker : markers

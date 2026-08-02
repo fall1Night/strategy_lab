@@ -15,6 +15,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from typing import Any
 
+import pandas as pd
+
 from .base import DataSource, SymbolSpec
 from .exceptions import DataSourceError, RetryableDataSourceError
 
@@ -125,3 +127,42 @@ class EastmoneyDataSource(DataSource):
                 f"rt={data.get('rt')} raw={raw[:200]!r}",
             )
         return list(payload.get("klines") or [])
+
+    def _to_dataframe(self, raw: Any) -> pd.DataFrame:
+        """把东财原始 kline 字符串列表转为 DataFrame，额外保留成交量（vol）。
+
+        东财 push2his klines 字段顺序为 f51..f61：
+          f51=date, f52=open, f53=close, f54=high, f55=low, f56=vol(股),
+          f57=amount(元) ...
+        故 ``parts`` 索引：0=date, 1=open, 2=close, 3=high, 4=low, 5=vol。
+        """
+        if raw is None:
+            return pd.DataFrame()
+        if isinstance(raw, pd.DataFrame):
+            return raw
+        if not isinstance(raw, list) or not raw:
+            return pd.DataFrame()
+        if not isinstance(raw[0], str):
+            return super()._to_dataframe(raw)
+        rows: list[dict[str, Any]] = []
+        for line in raw:
+            parts = line.split(",")
+            if len(parts) < 5:
+                continue
+            try:
+                rec = {
+                    "date": parts[0],
+                    "open": float(parts[1]),
+                    "close": float(parts[2]),
+                    "high": float(parts[3]),
+                    "low": float(parts[4]),
+                }
+                # 第 6 字段 f56 为成交量（原始股数）；缺失则留空（后续容错为 None）
+                if len(parts) >= 6 and parts[5] not in ("", None):
+                    rec["vol"] = float(parts[5])
+                rows.append(rec)
+            except (ValueError, TypeError):
+                continue
+        if not rows:
+            return pd.DataFrame()
+        return pd.DataFrame(rows)

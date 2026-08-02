@@ -1,0 +1,33 @@
+sequenceDiagram
+    participant U as 用户/Web层
+    participant RS as run_symbol<br/>(backtest.py)
+    participant DF as data_feed.load_bars
+    participant REPO as repository.save_run
+    participant DB as SQLite 表<br/>price_points
+    participant SER as serializers<br/>.db_row_to_result
+    participant DD as build_dashboard_data<br/>(render_dashboard.py)
+    participant TPL as dashboard_template.html<br/>buildPriceChart
+
+    Note over U,RS: 路径A · 新回测（run_backtest → run_symbol）
+    U->>RS: run_symbol(cfg, symbol, start, end)
+    RS->>DF: load_bars(daily_csv)
+    DF-->>RS: daily(date,open,high,low,close,vol)
+    RS->>RS: 过滤 [start,end] + 构造 price_curve(含 volume)
+    RS->>REPO: save_run(meta, equity, trades, summary, positions, price_curve)
+    REPO->>DB: bulk_insert_mappings(PricePoint, price_maps)
+    DB-->>REPO: run_id
+    REPO-->>RS: run_id
+    RS-->>U: result(含 price_curve, run_id)
+
+    Note over U,SER: 路径B · 历史详情（/history?run_id=）
+    U->>SER: get_run(run_id) → db_row_to_result(run)
+    SER->>DB: joinedload(run.price)
+    DB-->>SER: PricePoint 行
+    SER-->>U: result(含 price_curve)
+
+    Note over U,TPL: 两条路径汇聚于 dashboard 构建
+    U->>DD: build_dashboard_data(equity_curve, trade_history, summary, price_curve, meta)
+    DD->>DD: _build_default_modules 生成 price_chart 模块<br/>(ohlc=price_curve, markers=_build_trade_markers)
+    DD-->>TPL: report_data → __REPORT_DATA__ JSON
+    TPL->>TPL: buildPriceChart() 画 K线+量副图+买卖点标记
+    TPL->>TPL: 绑定缩放(滚轮/拖拽/滑块/重置)

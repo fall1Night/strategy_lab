@@ -114,6 +114,7 @@ def build_single_dashboard(result: dict[str, Any], cfg: dict[str, Any],
         language="zh",
         market=cfg.get("market", "china_a"),
         extra_modules=extra,
+        price_curve=result.get("price_curve"),
     )
     return render_dashboard(rd, output_path=out_path)
 
@@ -135,6 +136,7 @@ def build_compare_dashboard(results: dict[str, dict[str, Any]], cfg: dict[str, A
             equity_curve=r["equity_curve"], trade_history=r["trade_history"],
             summary=r["summary"], meta={"initial_cash": init_cash, "strategy_name": cfg.get("name", "")},
             language="zh", market=cfg.get("market", "china_a"), extra_modules=[pos_mod],
+            price_curve=r.get("price_curve"),
         )
         for m in rd["modules"]:
             m["tab"] = prefix
@@ -280,6 +282,7 @@ def build_compare_from_runs(
             language="zh",
             market=cfg.get("market", "china_a"),
             extra_modules=[pos_mod],
+            price_curve=r.get("price_curve"),
         )
         for m in rd["modules"]:
             m["tab"] = rid

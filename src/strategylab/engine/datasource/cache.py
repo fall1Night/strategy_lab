@@ -11,6 +11,7 @@ meta 字段新增 ``source``，区间覆盖判断逻辑沿用既有 ``_covers``�
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 from datetime import datetime, timedelta
@@ -138,8 +139,8 @@ class KlineCache:
     # ------------------------------------------------------------------
     @staticmethod
     def _empty_kline_df() -> "pd.DataFrame":
-        """返回空 K 线 DataFrame（列与缓存一致）。"""
-        return pd.DataFrame(columns=["date", "open", "high", "low", "close"])
+        """返回空 K 线 DataFrame（列与缓存一致，含可选 vol）。"""
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "vol"])
 
     @staticmethod
     def _parse_yyyymmdd(value: str) -> "datetime":
@@ -269,7 +270,7 @@ class KlineCache:
             "rows": rows,
             "first": first_date,
             "last": last_date,
-            "version": 2,
+            "version": 3,
             "source": source,
         }
         self._atomic_write_meta(meta_dict, meta_path)
@@ -364,10 +365,14 @@ class KlineCache:
         # 原子写 CSV
         rows = self._atomic_write_csv(df, csv_path)
 
-        # 元信息
-        dates = df["date"].sort_values()
-        first_date = dates.iloc[0].strftime("%Y%m%d") if len(dates) > 0 else None
-        last_date = dates.iloc[-1].strftime("%Y%m%d") if len(dates) > 0 else None
+        # 元信息：构造 "YYYYMMDD" 字符串首末日期，与 _covers /
+        # _incremental_window 的日期字典序比较约定一致（同文件 merge 处已如此处理）。
+        # 兼容 df["date"] 既可能是 "YYYY-MM-DD" 字符串、也可能是 pandas Timestamp
+        # 两种情况：统一先 to_datetime 再 strftime，避免 Timestamp.replace（期望整型
+        # 参数）或 str.replace 在错误类型上抛错。
+        dates = pd.to_datetime(df["date"]).dt.strftime("%Y%m%d").sort_values()
+        first_date = dates.iloc[0] if len(dates) > 0 else None
+        last_date = dates.iloc[-1] if len(dates) > 0 else None
 
         meta: dict[str, Any] = {
             "beg": beg,
@@ -375,7 +380,7 @@ class KlineCache:
             "rows": rows,
             "first": first_date,
             "last": last_date,
-            "version": 2,
+            "version": 3,
             "source": source,
         }
         self._atomic_write_meta(meta, meta_path)
@@ -387,11 +392,20 @@ class KlineCache:
     # ------------------------------------------------------------------
     @staticmethod
     def _atomic_write_csv(df: pd.DataFrame, csv_path: Path) -> int:
-        """把 DataFrame 原子写入 CSV。"""
-        lines: list[str] = ["date,open,high,low,close"]
+        """把 DataFrame 原子写入 CSV（含可选 vol 列，缺失写为空）。"""
+        lines: list[str] = ["date,open,high,low,close,vol"]
         for _, row in df.iterrows():
             d = str(row["date"])[:10]  # YYYY-MM-DD
-            lines.append(f"{d},{row['open']},{row['high']},{row['low']},{row['close']}")
+            o = row["open"]
+            h = row["high"]
+            l = row["low"]
+            c = row["close"]
+            raw_vol = row.get("vol", None)
+            if raw_vol is None or (isinstance(raw_vol, float) and math.isnan(raw_vol)):
+                vol_str = ""  # 旧缓存无成交量 / 缺失 → 空，读回时容错为 None
+            else:
+                vol_str = str(raw_vol)
+            lines.append(f"{d},{o},{h},{l},{c},{vol_str}")
         content = "\n".join(lines) + "\n"
 
         tmp = tempfile.NamedTemporaryFile(

@@ -196,6 +196,7 @@ def build_dashboard_data(
     event_overview_mode: str | None = None,
     extra_modules: list[dict[str, Any]] | None = None,
     ui_overrides: dict[str, Any] | None = None,
+    price_curve: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the report_data dict for the dashboard template.
 
@@ -291,6 +292,8 @@ def build_dashboard_data(
         "pnl_curve": pnl_curve,
         "drawdown_curve": drawdown_curve,
         "trade_history": trade_history,
+        # 价格曲线（K 线 + 成交量）：下沉给 _build_default_modules 生成 price_chart
+        "price_curve": price_curve or [],
     }
     report_data["ui"] = _merge_ui_overrides(
         _build_default_ui(report_data, language=language),
@@ -1091,48 +1094,120 @@ def _build_default_modules(
         {"key": "pnl_pct", "label": L["i18n"]["trades_col_pnl_pct"], "format": "pct"},
     ])
 
-    modules = [
-        {
-            "type": "overview_chart",
-            "tab": "overview",
-            "width": "full",
-            "stats": overview_stats,
-            "points": _merge_overview_points(equity_curve, drawdown_curve, meta.get("window_start_value")),
-            "markers": _build_trade_markers(trade_history, market=market),
-            "series_key": "equity",
-            "stroke": "#f23645",
-            "area_fill": "rgba(181,126,255,0.18)",
-            "bars_key": "drawdown_abs",
-            "bars_fill": "rgba(181,126,255,0.32)",
-            "toggles": [
-                {"id": "equity", "label": L["toggle_equity"], "checked": True},
-                {"id": "drawdown", "label": L["toggle_drawdown"], "checked": True},
-                {"id": "trades", "label": L["toggle_trades"], "checked": True},
-            ],
-            "modes": [
-                {"id": "percentage", "label": L["mode_percentage"], "active": True},
-                {"id": "absolute", "label": L["mode_absolute"], "active": False},
-            ],
-        },
-        {
-            "type": "metric_table",
-            "tab": "overview",
-            "title": L["metric_table_title"],
-            "subtitle": f"{meta.get('strategy_name') or 'Strategy'} · {L['metric_table_subtitle_suffix']}",
-            "columns": [L["col_metric"], L["col_all"]],
-            "rows": metric_rows,
-        },
-        {
-            "type": "trades_table",
-            "tab": "overview",
-            "title": L["trades_title"],
-            "subtitle": L["trades_subtitle"],
-            "rows": trade_history,
-            "columns": trade_columns,
-        },
-    ]
+    metric_table_module = {
+        "type": "metric_table",
+        "tab": "overview",
+        "title": L["metric_table_title"],
+        "subtitle": f"{meta.get('strategy_name') or 'Strategy'} · {L['metric_table_subtitle_suffix']}",
+        "columns": [L["col_metric"], L["col_all"]],
+        "rows": metric_rows,
+    }
+    trades_table_module = {
+        "type": "trades_table",
+        "tab": "overview",
+        "title": L["trades_title"],
+        "subtitle": L["trades_subtitle"],
+        "rows": trade_history,
+        "columns": trade_columns,
+    }
+
+    # 单标的详情页：price_curve 非空时，把「K 线走势图」与「权益曲线图」合并为一张
+    # combo_chart 组合图（上半区 K线+成交量+买卖点，下半区 权益曲线+回撤+买卖点，
+    # 共享 X 轴与一套缩放交互），不再同时下发 overview_chart + price_chart 两张卡。
+    price_curve = report_data.get("price_curve") or []
+    if price_curve:
+        modules = [
+            {
+                "type": "combo_chart",
+                "tab": "overview",
+                "width": "full",
+                "title": "股价走势 + 权益曲线",
+                "subtitle": f"{meta.get('strategy_name') or 'Strategy'} · 日线 · 含成交量",
+                # stats 复用 overview_stats，显示在卡片顶部
+                "stats": overview_stats,
+                # ohlc：[{date,open,high,low,close,volume}, ...]，volume 可为 None
+                "ohlc": price_curve,
+                # overview 的 points（date/equity/drawdown_abs/pnl），与 ohlc 按 date 对齐；
+                # 两者日期并集为 X 轴基准（前端 buildComboChart 合并映射）
+                "points": _merge_overview_points(equity_curve, drawdown_curve, meta.get("window_start_value")),
+                # 复用 overview_chart 的买卖点（buy/sell 三角），上下分面同一日期同一 X
+                "markers": _build_trade_markers(trade_history, market=market),
+                "toggles": [
+                    {"id": "drawdown", "label": L["toggle_drawdown"], "checked": True},
+                    {"id": "trades", "label": L["toggle_trades"], "checked": True},
+                ],
+                "modes": [
+                    {"id": "percentage", "label": L["mode_percentage"], "active": True},
+                    {"id": "absolute", "label": L["mode_absolute"], "active": False},
+                ],
+            },
+            metric_table_module,
+            trades_table_module,
+        ]
+    else:
+        # 无 K 线数据（如组合/无价格标的）：保持原 overview_chart 权益曲线卡，行为完全不变
+        modules = [
+            {
+                "type": "overview_chart",
+                "tab": "overview",
+                "width": "full",
+                "zoom_group": "price_equity",
+                "stats": overview_stats,
+                "points": _merge_overview_points(equity_curve, drawdown_curve, meta.get("window_start_value")),
+                "markers": _build_trade_markers(trade_history, market=market),
+                "series_key": "equity",
+                "stroke": "#f23645",
+                "area_fill": "rgba(181,126,255,0.18)",
+                "bars_key": "drawdown_abs",
+                "bars_fill": "rgba(181,126,255,0.32)",
+                "toggles": [
+                    {"id": "equity", "label": L["toggle_equity"], "checked": True},
+                    {"id": "drawdown", "label": L["toggle_drawdown"], "checked": True},
+                    {"id": "trades", "label": L["toggle_trades"], "checked": True},
+                ],
+                "modes": [
+                    {"id": "percentage", "label": L["mode_percentage"], "active": True},
+                    {"id": "absolute", "label": L["mode_absolute"], "active": False},
+                ],
+            },
+            metric_table_module,
+            trades_table_module,
+        ]
 
     return modules
+
+
+def _build_price_chart_module(
+    report_data: dict[str, Any],
+    language: str | None = None,
+    market: str | None = None,
+) -> dict[str, Any] | None:
+    """保留分立 price_chart 模块生成逻辑（向后兼容）。
+
+    单标的详情页现改用 combo_chart 组合图（见 _build_default_modules），不再同时
+    下发 overview_chart + price_chart 两张卡；本函数保留旧 K 线图模块的生成能力，
+    供其它需要独立 K 线卡片的场景（如未来多标的/自定义 dashboard）复用。
+    """
+    price_curve = report_data.get("price_curve") or []
+    if not price_curve:
+        return None
+    L = _resolve_locale(language)
+    meta = report_data.get("meta", {})
+    trade_history = report_data.get("trade_history", [])
+    if market is None:
+        market = meta.get("market")
+    return {
+        "type": "price_chart",
+        "tab": "overview",
+        "width": "full",
+        "zoom_group": "price_equity",
+        "title": "股价走势（K线）",
+        "subtitle": f"{meta.get('strategy_name') or 'Strategy'} · 日线 · 含成交量",
+        # ohlc：[{date,open,high,low,close,volume}, ...]，volume 可为 None
+        "ohlc": price_curve,
+        # 复用 overview_chart 的买卖点（buy/sell 三角）
+        "markers": _build_trade_markers(trade_history, market=market),
+    }
 
 
 def _build_event_modules(

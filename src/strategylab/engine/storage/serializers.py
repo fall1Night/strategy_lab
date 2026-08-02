@@ -70,6 +70,19 @@ def db_row_to_result(run: BacktestRun) -> dict[str, Any]:
     ]
     positions = json.loads(run.positions_json) if run.positions_json else []
 
+    # 价格曲线（K 线）：按 date 排序；volume 为 None 表示旧缓存无成交量
+    price_curve = [
+        {
+            "date": p.date.isoformat(),
+            "open": float(p.open),
+            "high": float(p.high),
+            "low": float(p.low),
+            "close": float(p.close),
+            "volume": float(p.volume) if p.volume is not None else None,
+        }
+        for p in sorted(run.price or [], key=lambda x: x.date)
+    ]
+
     start = run.start.isoformat() if run.start else None
     end = run.end.isoformat() if run.end else None
     initial_cash = float(run.initial_cash) if run.initial_cash is not None else None
@@ -89,6 +102,7 @@ def db_row_to_result(run: BacktestRun) -> dict[str, Any]:
         "positions": positions,
         "equity_curve": equity_curve,
         "trade_history": trade_history,
+        "price_curve": price_curve,
         # 附加字段（run_symbol 不提供，但对比 / 展示有用）
         "run_id": run.run_id,
         "start": start,
