@@ -773,7 +773,8 @@ def rank_runs(
     - ``scope``：板块 code（按该板块聚合过滤）或 None/空（全部已跑过的）。
     - ``symbols``：自定义池 symbols（与 scope 互斥，优先于 scope）。
     - ``sort_by``：排序字段白名单 ``symbol_name`` / ``total_return_pct`` /
-      ``max_drawdown_pct`` / ``sharpe`` / ``win_rate_pct`` / ``last_buy_date``，
+      ``max_drawdown_pct`` / ``sharpe`` / ``win_rate_pct`` / ``last_buy_date`` /
+      ``profit_factor``，
       支持逗号分隔的多键组合排序（如 ``"last_buy_date,win_rate_pct"``，最多 3 个，
       从左到右优先级递减）；``order`` 同步为逗号分隔的方向。为 None、空或全非法时
       保持默认排序（total_return_pct 降序，向后兼容）。
@@ -822,6 +823,27 @@ def rank_runs(
             )
             buy_map = {rid: (d.isoformat() if d else None) for rid, d in sub}
 
+        # FR-44：按 run_id 聚合计算盈亏比（Profit Factor = 总盈利 / 总亏损绝对值）。
+        # 一条分组聚合避免 N+1；亏损总额为 0（全盈利）时 NULLIF 得 NULL → None（前端显示 "--"）。
+        profit_map: dict[str, float | None] = {}
+        if run_ids:
+            pf_sub = (
+                s.query(
+                    Trade.run_id,
+                    (
+                        func.sum(case((Trade.pnl > 0, Trade.pnl), else_=0))
+                        / func.nullif(
+                            func.abs(func.sum(case((Trade.pnl < 0, Trade.pnl), else_=0))),
+                            0,
+                        )
+                    ).label("profit_factor"),
+                )
+                .filter(Trade.run_id.in_(run_ids))
+                .group_by(Trade.run_id)
+                .all()
+            )
+            profit_map = {rid: (float(pf) if pf is not None else None) for rid, pf in pf_sub}
+
         items: list[dict[str, Any]] = []
         today = datetime.date.today()
         for r in all_rows:
@@ -852,6 +874,7 @@ def rank_runs(
                         else None
                     ),
                     "last_buy_date": buy_map.get(r.run_id),  # FR-43：最近买入日期（ISO，无则为 None）
+                    "profit_factor": profit_map.get(r.run_id),  # FR-44：盈亏比（总盈利/总亏损绝对值，全盈利→None）
                     "end": r.end.isoformat() if r.end else None,
                     "stale": stale,
                     "_created_at": r.created_at,  # 去重辅助字段
@@ -875,6 +898,7 @@ def rank_runs(
             "sharpe",
             "win_rate_pct",
             "last_buy_date",  # FR-43：最近买入日期（NULL 统一排末尾，沿用 FR-20 规则）
+            "profit_factor",  # FR-44：盈亏比（NULL 统一排末尾，沿用 FR-20 规则）
         }
 
         # 解析多键排序规则：sort_by 逗号分隔取前 3 个，order 平行逗号分隔（不足默认 desc）

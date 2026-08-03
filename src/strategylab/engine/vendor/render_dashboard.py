@@ -279,6 +279,20 @@ def build_dashboard_data(
             )
         meta.setdefault("report_kind", "strategy")
 
+    # FR-44：盈亏比 = 总盈利 / 总亏损绝对值，读取时动态计算（不做落库）。
+    # 亏损总额为 0（全盈利或无亏损交易）→ None，前端显示 "--"。
+    gross_profit = 0.0
+    gross_loss = 0.0
+    for _trade in trade_history:
+        pnl = _safe_float(_trade.get("pnl")) or 0.0
+        if pnl > 0:
+            gross_profit += pnl
+        elif pnl < 0:
+            gross_loss += pnl
+    summary["profit_factor"] = (
+        gross_profit / abs(gross_loss) if gross_loss < 0 else None
+    )
+
     drawdown_curve = _build_drawdown_curve(equity_curve)
     pnl_curve = [
         {"date": point["date"], "pnl": float(point["value"]) - float(window_start_value)}
@@ -1061,6 +1075,7 @@ def _build_default_modules(
         _kpi(L["kpi_total_trades"], str(summary.get("total_trades", 0))),
         _kpi(L["kpi_win_rate"], numberFormatPy(summary.get("win_rate_pct"), suffix="%"), raw=summary.get("win_rate_pct")),
         _kpi(L["kpi_sharpe"], numberFormatPy(summary.get("sharpe"), digits=3), raw=summary.get("sharpe")),
+        _kpi(L["kpi_profit_factor"], numberFormatPy(_profit_factor_value(summary), digits=2), raw=summary.get("profit_factor")),  # FR-44：盈亏比（None 显示 "--"）
     ]
 
     metric_rows = [
@@ -1069,6 +1084,7 @@ def _build_default_modules(
         _metric_row(L["metric_max_drawdown"], [_metric(numberFormatPy(summary.get("max_drawdown_pct"), suffix="%"), raw=-abs(summary.get("max_drawdown_pct") or 0))]),
         _metric_row(L["metric_total_trades"], [_metric(str(summary.get("total_trades", 0)))]),
         _metric_row(L["metric_win_rate"], [_metric(numberFormatPy(summary.get("win_rate_pct"), suffix="%"), raw=summary.get("win_rate_pct"))]),
+        _metric_row(L["metric_profit_factor"], [_metric(numberFormatPy(_profit_factor_value(summary), digits=2), raw=summary.get("profit_factor"))]),  # FR-44：盈亏比（None 显示 "--"）
         _metric_row(L["metric_final_value"], [_metric(numberFormatPy(final_value_pct, suffix="%"), raw=final_value_pct)]),
     ]
 
@@ -1231,6 +1247,7 @@ def _build_event_modules(
         _kpi(L["kpi_win_rate"], numberFormatPy(summary.get("win_rate_pct"), suffix="%"), raw=summary.get("win_rate_pct")),
         _kpi(L["kpi_avg_return"], numberFormatPy(summary.get("avg_return_pct"), suffix="%"), raw=summary.get("avg_return_pct")),
         _kpi(L["kpi_median_return"], numberFormatPy(summary.get("median_return_pct"), suffix="%"), raw=summary.get("median_return_pct")),
+        _kpi(L["kpi_profit_factor"], numberFormatPy(_profit_factor_value(summary), digits=2), raw=summary.get("profit_factor")),  # FR-44：盈亏比（None 显示 "--"）
     ]
     metric_rows = [
         _metric_row(L["metric_cumulative_return"], [_metric(numberFormatPy(summary.get("total_return_pct"), suffix="%"), raw=summary.get("total_return_pct"))]),
@@ -1240,6 +1257,7 @@ def _build_event_modules(
         _metric_row(L["metric_win_rate"], [_metric(numberFormatPy(summary.get("win_rate_pct"), suffix="%"), raw=summary.get("win_rate_pct"))]),
         _metric_row(L["metric_best_trade"], [_metric(numberFormatPy(summary.get("best_trade_pct"), suffix="%"), raw=summary.get("best_trade_pct"))]),
         _metric_row(L["metric_worst_trade"], [_metric(numberFormatPy(summary.get("worst_trade_pct"), suffix="%"), raw=summary.get("worst_trade_pct"))]),
+        _metric_row(L["metric_profit_factor"], [_metric(numberFormatPy(_profit_factor_value(summary), digits=2), raw=summary.get("profit_factor"))]),  # FR-44：盈亏比（None 显示 "--"）
     ]
 
     modules: list[dict[str, Any]] = []
@@ -1315,6 +1333,11 @@ def _merge_overview_points(
             "pnl": value - float(initial_cash or 0),
         })
     return points
+
+
+def _profit_factor_value(summary: dict[str, Any]) -> float | None:
+    """读取动态计算的盈亏比（summary.profit_factor）；亏损总额为 0 → None。"""
+    return summary.get("profit_factor")
 
 
 def _kpi(label: str, value: str, pct: float | None = None, raw: float | None = None) -> dict[str, Any]:

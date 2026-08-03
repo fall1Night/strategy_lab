@@ -956,8 +956,8 @@ __SCOPE_OPTS__
 <script>
 var curStrategy='', curScope='', curSymbols='';
 // —— 组合排序（多键排序）核心状态：curSortRules 为 [{key,dir}, ...]，最多 3 条 ——
-var SORT_FIELDS=[['symbol_name','股票名称'],['total_return_pct','总收益率'],['max_drawdown_pct','最大回撤'],['sharpe','夏普'],['win_rate_pct','胜率'],['last_buy_date','最近买入日期']];
-var SORT_WHITELIST={'symbol_name':1,'total_return_pct':1,'max_drawdown_pct':1,'sharpe':1,'win_rate_pct':1,'last_buy_date':1};
+var SORT_FIELDS=[['symbol_name','股票名称'],['total_return_pct','总收益率'],['max_drawdown_pct','最大回撤'],['sharpe','夏普'],['win_rate_pct','胜率'],['profit_factor','盈亏比'],['last_buy_date','最近买入日期']];
+var SORT_WHITELIST={'symbol_name':1,'total_return_pct':1,'max_drawdown_pct':1,'sharpe':1,'win_rate_pct':1,'profit_factor':1,'last_buy_date':1};
 var DEFAULT_SORT_RULES=[{key:'total_return_pct', dir:'desc'}];
 var SORT_STORAGE_KEY='strategylab.rankSort.v1';
 
@@ -1200,7 +1200,7 @@ function sortBy(col){
   loadRank(1);
 }
 function headerHtml(){
-  var cols=[['symbol_name','股票名称',true],['total_return_pct','总收益率',true],['max_drawdown_pct','最大回撤',true],['sharpe','夏普',true],['win_rate_pct','胜率',true],['last_buy_date','最近买入日期',true],['','数据时效',false]];
+  var cols=[['symbol_name','股票名称',true],['total_return_pct','总收益率',true],['max_drawdown_pct','最大回撤',true],['sharpe','夏普',true],['win_rate_pct','胜率',true],['profit_factor','盈亏比',true],['last_buy_date','最近买入日期',true],['','数据时效',false]];
   // 构建 key -> {priority, dir} 索引，用于在表头标注组合排序优先级
   var sortIdx={};
   for(var i=0;i<curSortRules.length;i++){ sortIdx[curSortRules[i].key]={pri:i+1, dir:curSortRules[i].dir}; }
@@ -1219,9 +1219,10 @@ function rowHtml(it){
   var dd=it.max_drawdown_pct==null?'—':Number(it.max_drawdown_pct).toFixed(2)+'%';
   var sh=it.sharpe==null?'—':Number(it.sharpe).toFixed(2);
   var wr=it.win_rate_pct==null?'—':Number(it.win_rate_pct).toFixed(2)+'%';
+  var pf=it.profit_factor==null?'—':Number(it.profit_factor).toFixed(2);
   var lbd=it.last_buy_date==null?'—':it.last_buy_date;
   var stale=it.stale?'<span class="stale">数据较旧，建议点「更新数据源」刷新行情后再重跑</span>':'';
-  return '<tr data-rid="'+it.run_id+'" onclick="openRun(this.dataset.rid)"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+wr+'</td><td>'+lbd+'</td><td>'+stale+'</td></tr>';
+  return '<tr data-rid="'+it.run_id+'" onclick="openRun(this.dataset.rid)"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+wr+'</td><td>'+pf+'</td><td>'+lbd+'</td><td>'+stale+'</td></tr>';
 }
 function openRun(rid){ window.open('/history?run_id='+rid); }
 function exportCsv(){
@@ -1807,7 +1808,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _ranks_to_csv(items: list[dict]) -> str:
     """把排名 items 转为 CSV 文本（含 BOM 供 Excel）。"""
-    cols = ["run_id", "symbol", "symbol_name", "total_return_pct", "max_drawdown_pct", "sharpe", "last_buy_date", "end", "stale"]
+    cols = ["run_id", "symbol", "symbol_name", "total_return_pct", "max_drawdown_pct", "sharpe", "profit_factor", "last_buy_date", "end", "stale"]
     lines = [",".join(cols)]
     for it in items:
         row = [
@@ -1817,6 +1818,7 @@ def _ranks_to_csv(items: list[dict]) -> str:
             "" if it.get("total_return_pct") is None else f"{it['total_return_pct']:.2f}",
             "" if it.get("max_drawdown_pct") is None else f"{it['max_drawdown_pct']:.2f}",
             "" if it.get("sharpe") is None else f"{it['sharpe']:.2f}",
+            "" if it.get("profit_factor") is None else f"{it['profit_factor']:.2f}",
             it.get("last_buy_date", "") or "",
             it.get("end", "") or "",
             "1" if it.get("stale") else "0",
