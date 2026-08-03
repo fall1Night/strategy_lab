@@ -835,12 +835,6 @@ def build_analysis_html() -> str:
     strat_opts = "\n".join(
         f'          <option value="{fname}">{name}</option>' for name, fname in list_strategy_options()
     )
-    import json as _json, pathlib
-    _sec_path = pathlib.Path("data/sectors.json")
-    _sectors = _json.loads(_sec_path.read_text(encoding="utf-8")) if _sec_path.exists() else []
-    scope_opts = '<option value="">全部已跑过的</option>\n' + "\n".join(
-        f'          <option value="{s["code"]}">{s["name"]}</option>' for s in _sectors
-    )
 
     template = """<!doctype html>
 <html lang="zh">
@@ -852,7 +846,15 @@ def build_analysis_html() -> str:
   * { box-sizing:border-box; }
   body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
          background:linear-gradient(160deg,#0f172a,#1e293b); color:#e2e8f0; min-height:100vh; }
-  .wrap { max-width:980px; margin:0 auto; padding:28px 20px 64px; }
+  .wrap { max-width:1240px; margin:0 auto; padding:28px 20px 64px; }
+  /* 两栏布局：左侧主列（排名表）+ 右侧边栏（策略统计分析），窄屏回退单列 */
+  .cols { display:flex; gap:18px; align-items:flex-start; }
+  .col-main { flex:0 0 70%; min-width:0; }
+  .col-side { flex:0 0 28%; min-width:0; }
+  @media (max-width:960px){
+    .cols { flex-direction:column; }
+    .col-main, .col-side { flex:1 1 auto; width:100%; }
+  }
   h1 { font-size:24px; margin:0 0 4px; }
   .sub { color:#94a3b8; margin:0 0 18px; font-size:14px; }
   .card { background:#1e293b; border:1px solid #334155; border-radius:14px; padding:22px 22px; margin-bottom:18px;
@@ -867,11 +869,18 @@ def build_analysis_html() -> str:
   button.ghost { background:#334155; font-weight:500; }
   button:disabled { opacity:.5; cursor:not-allowed; }
   .hint { font-size:12px; color:#64748b; margin-top:6px; }
+  /* 筛选条件行：三列并排，窄屏自动换行 */
+  .filters { display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; margin:2px 0 6px; }
+  .filters .f-item { flex:1 1 150px; min-width:130px; }
+  .filters label { margin:0 0 6px; }
   .summary { font-size:14px; margin-bottom:10px; }
   .summary a { color:#93c5fd; }
   .rtab { width:100%; border-collapse:collapse; font-size:13px; }
   .rtab th, .rtab td { border-bottom:1px solid #1e293b; padding:10px 10px; text-align:left; cursor:pointer; }
   .rtab th { color:#93c5fd; cursor:default; }
+  /* FR-46：表头固定——滚动容器为 .table-scroll，表头吸顶且背景不透明防穿透 */
+  .rtab thead th { position:sticky; top:0; background:#24344a; z-index:2; }
+  .table-scroll { max-height:600px; overflow-y:auto; border-radius:10px; }
   .rtab th.sortable { cursor:pointer; user-select:none; white-space:nowrap; }
   .rtab th.sortable:hover { color:#bfdbfe; text-decoration:underline; }
   .rtab th.sorted { color:#fbbf24; }
@@ -912,20 +921,29 @@ __NAV_CSS__</style>
 __NAV_HTML__
 <div class="wrap">
   <h1>🔍 分析查询</h1>
-  <p class="sub">选策略 + 选范围，查看已落库回测的收益排名（按总收益率降序）。点行查看单标的详情仪表盘。</p>
+  <p class="sub">选策略 + 筛选条件，查看已落库回测的收益排名（默认按总收益率降序）。点行查看单标的详情仪表盘。</p>
 
   <div class="card">
     <label for="strategy">策略</label>
     <select id="strategy">
 __STRAT_OPTS__
     </select>
-    <label for="scope-sel">范围</label>
-    <select id="scope-sel">
-__SCOPE_OPTS__
-    </select>
-    <label for="pool-symbols">自定义池（可选，代码逗号/空格分隔；填写后优先于上方范围）</label>
-    <textarea id="pool-symbols" rows="3" placeholder="600216.SH, 000001.SZ"></textarea>
+    <div class="filters">
+      <div class="f-item">
+        <label for="win-rate-min">胜率下限（%）</label>
+        <input id="win-rate-min" type="number" min="0" max="100" step="0.1" placeholder="如 50">
+      </div>
+      <div class="f-item">
+        <label for="profit-factor-min">盈亏比下限</label>
+        <input id="profit-factor-min" type="number" min="0" step="0.1" placeholder="如 2">
+      </div>
+      <div class="f-item">
+        <label for="name-kw">股票名称</label>
+        <input id="name-kw" type="text" placeholder="模糊匹配，如 科技">
+      </div>
+    </div>
     <button type="button" onclick="loadRank(1)">查询排名</button>
+    <button type="button" class="ghost" onclick="resetFilters()">↺ 重置筛选</button>
     <button type="button" class="ghost" onclick="exportCsv()">⬇ 导出 CSV</button>
     <button type="button" class="ghost" onclick="toggleSortPanel()">⚙ 排序</button>
   </div>
@@ -941,23 +959,28 @@ __SCOPE_OPTS__
     </div>
   </div>
 
-  <div class="card">
-    <h2 class="card-title">📊 策略统计分析</h2>
-    <div class="summary" id="stats-meta">—</div>
-    <div id="stats-body"><span class="empty">请先查询</span></div>
-  </div>
-
-  <div class="card">
-    <div class="summary" id="rank-summary">—</div>
-    <div id="rank-table"><span class="empty">请先查询</span></div>
-    <div class="pager" id="rank-pager"></div>
+  <div class="cols">
+    <div class="col-main">
+      <div class="card">
+        <div class="summary" id="rank-summary">—</div>
+        <div id="rank-table"><span class="empty">请先查询</span></div>
+        <div class="pager" id="rank-pager"></div>
+      </div>
+    </div>
+    <div class="col-side">
+      <div class="card">
+        <h2 class="card-title">📊 策略统计分析</h2>
+        <div class="summary" id="stats-meta">—</div>
+        <div id="stats-body"><span class="empty">请先查询</span></div>
+      </div>
+    </div>
   </div>
 </div>
 <script>
-var curStrategy='', curScope='', curSymbols='';
+var curStrategy='', curWinRateMin='', curProfitFactorMin='', curNameKw='';
 // —— 组合排序（多键排序）核心状态：curSortRules 为 [{key,dir}, ...]，最多 3 条 ——
-var SORT_FIELDS=[['symbol_name','股票名称'],['total_return_pct','总收益率'],['max_drawdown_pct','最大回撤'],['sharpe','夏普'],['win_rate_pct','胜率'],['profit_factor','盈亏比'],['last_buy_date','最近买入日期']];
-var SORT_WHITELIST={'symbol_name':1,'total_return_pct':1,'max_drawdown_pct':1,'sharpe':1,'win_rate_pct':1,'profit_factor':1,'last_buy_date':1};
+var SORT_FIELDS=[['symbol_name','股票名称'],['total_return_pct','总收益率'],['max_drawdown_pct','最大回撤'],['sharpe','夏普'],['win_rate_pct','胜率'],['profit_factor','盈亏比'],['last_open_date','最近建仓'],['last_t_buy_date','最近做T']];
+var SORT_WHITELIST={'symbol_name':1,'total_return_pct':1,'max_drawdown_pct':1,'sharpe':1,'win_rate_pct':1,'profit_factor':1,'last_open_date':1,'last_t_buy_date':1};
 var DEFAULT_SORT_RULES=[{key:'total_return_pct', dir:'desc'}];
 var SORT_STORAGE_KEY='strategylab.rankSort.v1';
 
@@ -1046,14 +1069,16 @@ function renderSortRules(){
 function loadRank(page){
   if(page==null||isNaN(page)||page<1) page=1;
   curStrategy=document.getElementById('strategy').value;
-  curScope=document.getElementById('scope-sel').value;
-  curSymbols=document.getElementById('pool-symbols').value.trim();
+  curWinRateMin=document.getElementById('win-rate-min').value.trim();
+  curProfitFactorMin=document.getElementById('profit-factor-min').value.trim();
+  curNameKw=document.getElementById('name-kw').value.trim();
   var qs='strategy='+encodeURIComponent(curStrategy)
     +'&page='+page+'&size=50'
     +'&sort_by='+encodeURIComponent(curSortRules.map(function(r){return r.key;}).join(','))
     +'&order='+encodeURIComponent(curSortRules.map(function(r){return r.dir;}).join(','));
-  if(curScope) qs+='&scope='+encodeURIComponent(curScope);
-  if(curSymbols) qs+='&symbols='+encodeURIComponent(curSymbols);
+  if(curWinRateMin!=='') qs+='&win_rate_min='+encodeURIComponent(curWinRateMin);
+  if(curProfitFactorMin!=='') qs+='&profit_factor_min='+encodeURIComponent(curProfitFactorMin);
+  if(curNameKw) qs+='&name_kw='+encodeURIComponent(curNameKw);
   fetch('/api/rank?'+qs).then(function(r){return r.json();}).then(function(d){
     var items=d.items||[], total=d.total||0, miss=d.miss_count, warmup=d.warmup||null;
     var stratSel=document.getElementById('strategy');
@@ -1071,9 +1096,10 @@ function loadRank(page){
       }
       pager.innerHTML=''; return;
     }
-    var h='<table class="rtab">'+headerHtml();
-    h+=items.map(rowHtml).join('');
-    h+='</table>';
+    // 表头固定：外层 .table-scroll 提供滚动容器，表头 thead th 吸顶
+    var h='<div class="table-scroll"><table class="rtab">'+headerHtml();
+    h+='<tbody>'+items.map(rowHtml).join('')+'</tbody>';
+    h+='</table></div>';
     box.innerHTML=h;
     var pages=Math.max(1, Math.ceil(total/50));
     pager.innerHTML='<button type="button" onclick="loadRank('+(page-1)+')" '+(page<=1?'disabled':'')+'>上一页</button>'
@@ -1105,9 +1131,9 @@ function statItemHtml(label, num, den){
     + '</div>';
 }
 
-// 纯聚合计算（与 DOM 无关，便于独立验证）：胜率>50% / |回撤|≤10·15·20 / 夏普>1
+// 纯聚合计算（与 DOM 无关，便于独立验证）：胜率>50% / |回撤|≤10·15·20 / 夏普>1 / 盈亏比>2
 function computeStrategyStats(items){
-  var st = { winRate:{num:0, den:0}, drawdown:{num10:0, num15:0, num20:0, den:0}, sharpe:{num:0, den:0} };
+  var st = { winRate:{num:0, den:0}, drawdown:{num10:0, num15:0, num20:0, den:0}, sharpe:{num:0, den:0}, pf:{num:0, den:0} };
   for(var i=0;i<items.length;i++){
     var it = items[i] || {};
     var wr = it.win_rate_pct;
@@ -1122,6 +1148,8 @@ function computeStrategyStats(items){
     }
     var sh = it.sharpe;
     if(isNumVal(sh)){ st.sharpe.den++; if(Number(sh) > 1) st.sharpe.num++; }
+    var pf = it.profit_factor;
+    if(isNumVal(pf)){ st.pf.den++; if(Number(pf) > 2) st.pf.num++; }
   }
   return st;
 }
@@ -1152,6 +1180,9 @@ function renderStrategyStats(items, total, truncated){
     + '</div>'
     + '<div class="stat-block"><h3>⚡ 夏普比分布</h3>'
     + statItemHtml('夏普比 &gt; 1', st.sharpe.num, st.sharpe.den)
+    + '</div>'
+    + '<div class="stat-block"><h3>📈 盈亏比分布</h3>'
+    + statItemHtml('盈亏比 &gt; 2', st.pf.num, st.pf.den)
     + '</div>';
 }
 
@@ -1162,8 +1193,9 @@ function loadStats(){
   var mySeq = ++statsSeq;
   box.innerHTML = '<span class="empty">统计计算中…</span>';
   var qs = 'strategy=' + encodeURIComponent(curStrategy) + '&size=' + STATS_PAGE_SIZE;
-  if(curScope) qs += '&scope=' + encodeURIComponent(curScope);
-  if(curSymbols) qs += '&symbols=' + encodeURIComponent(curSymbols);
+  if(curWinRateMin!=='') qs += '&win_rate_min=' + encodeURIComponent(curWinRateMin);
+  if(curProfitFactorMin!=='') qs += '&profit_factor_min=' + encodeURIComponent(curProfitFactorMin);
+  if(curNameKw) qs += '&name_kw=' + encodeURIComponent(curNameKw);
   var all = [];
   var page = 1;
   var next = function(){
@@ -1200,18 +1232,18 @@ function sortBy(col){
   loadRank(1);
 }
 function headerHtml(){
-  var cols=[['symbol_name','股票名称',true],['total_return_pct','总收益率',true],['max_drawdown_pct','最大回撤',true],['sharpe','夏普',true],['win_rate_pct','胜率',true],['profit_factor','盈亏比',true],['last_buy_date','最近买入日期',true],['','数据时效',false]];
+  var cols=[['symbol_name','股票名称',true],['total_return_pct','总收益率',true],['max_drawdown_pct','最大回撤',true],['sharpe','夏普',true],['win_rate_pct','胜率',true],['profit_factor','盈亏比',true],['last_open_date','最近建仓',true],['last_t_buy_date','最近做T',true],['','数据时效',false]];
   // 构建 key -> {priority, dir} 索引，用于在表头标注组合排序优先级
   var sortIdx={};
   for(var i=0;i<curSortRules.length;i++){ sortIdx[curSortRules[i].key]={pri:i+1, dir:curSortRules[i].dir}; }
-  return '<tr>'+cols.map(function(c){
+  return '<thead><tr>'+cols.map(function(c){
     var key=c[0], label=c[1], sortable=c[2];
     if(!sortable) return '<th>'+label+'</th>';
     var info=sortIdx[key];
     var ind=info?(' '+info.pri+(info.dir==='asc'?'▲':'▼')):'';
     var cls=' class="sortable'+(info?' sorted':'')+'"';
     return '<th'+cls+' data-col="'+key+'" onclick="sortBy(this.dataset.col)">'+label+ind+'</th>';
-  }).join('')+'</tr>';
+  }).join('')+'</tr></thead>';
 }
 function rowHtml(it){
   var tr=it.total_return_pct==null?'—':(it.total_return_pct>=0?'+':'')+Number(it.total_return_pct).toFixed(2)+'%';
@@ -1220,29 +1252,38 @@ function rowHtml(it){
   var sh=it.sharpe==null?'—':Number(it.sharpe).toFixed(2);
   var wr=it.win_rate_pct==null?'—':Number(it.win_rate_pct).toFixed(2)+'%';
   var pf=it.profit_factor==null?'—':Number(it.profit_factor).toFixed(2);
-  var lbd=it.last_buy_date==null?'—':it.last_buy_date;
+  var lod=it.last_open_date==null?'—':it.last_open_date;
+  var ltd=it.last_t_buy_date==null?'—':it.last_t_buy_date;
   var stale=it.stale?'<span class="stale">数据较旧，建议点「更新数据源」刷新行情后再重跑</span>':'';
-  return '<tr data-rid="'+it.run_id+'" onclick="openRun(this.dataset.rid)"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+wr+'</td><td>'+pf+'</td><td>'+lbd+'</td><td>'+stale+'</td></tr>';
+  return '<tr data-rid="'+it.run_id+'" onclick="openRun(this.dataset.rid)"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+wr+'</td><td>'+pf+'</td><td>'+lod+'</td><td>'+ltd+'</td><td>'+stale+'</td></tr>';
 }
 function openRun(rid){ window.open('/history?run_id='+rid); }
 function exportCsv(){
   var qs='strategy='+encodeURIComponent(curStrategy)+'&export=csv'
     +'&sort_by='+encodeURIComponent(curSortRules.map(function(r){return r.key;}).join(','))
     +'&order='+encodeURIComponent(curSortRules.map(function(r){return r.dir;}).join(','));
-  if(curScope) qs+='&scope='+encodeURIComponent(curScope);
-  if(curSymbols) qs+='&symbols='+encodeURIComponent(curSymbols);
+  if(curWinRateMin!=='') qs+='&win_rate_min='+encodeURIComponent(curWinRateMin);
+  if(curProfitFactorMin!=='') qs+='&profit_factor_min='+encodeURIComponent(curProfitFactorMin);
+  if(curNameKw) qs+='&name_kw='+encodeURIComponent(curNameKw);
   window.open('/api/rank?'+qs);
 }
+function resetFilters(){
+  document.getElementById('win-rate-min').value='';
+  document.getElementById('profit-factor-min').value='';
+  document.getElementById('name-kw').value='';
+  curWinRateMin=''; curProfitFactorMin=''; curNameKw='';
+  loadRank(1);
+}
 document.getElementById('strategy').addEventListener('change',function(){ loadRank(1); });
-document.getElementById('scope-sel').addEventListener('change',function(){ loadRank(1); });
-document.getElementById('pool-symbols').addEventListener('change',function(){ loadRank(1); });
+document.getElementById('win-rate-min').addEventListener('change',function(){ loadRank(1); });
+document.getElementById('profit-factor-min').addEventListener('change',function(){ loadRank(1); });
+document.getElementById('name-kw').addEventListener('change',function(){ loadRank(1); });
 window.addEventListener('DOMContentLoaded', function(){ loadRank(1); });
 </script>
 </body>
 </html>"""
     return (
         template.replace("__STRAT_OPTS__", strat_opts)
-        .replace("__SCOPE_OPTS__", scope_opts)
         .replace("__NAV_HTML__", NAV_HTML)
         .replace("__NAV_CSS__", NAV_CSS)
     )
@@ -1262,6 +1303,16 @@ white-space:pre-wrap;font-family:monospace;font-size:13px}} a{{color:#1f6feb}}</
 # --------------------------------------------------------------------------
 # HTTP 处理
 # --------------------------------------------------------------------------
+def _opt_float(raw: str) -> float | None:
+    """query 参数转可选 float：空串/None → None；非法值 → None（不筛该条件）。"""
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_html(self, html: str, status: int = 200):
         body = html.encode("utf-8")
@@ -1356,6 +1407,9 @@ class Handler(BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(parsed.query)
         strategy = (params.get("strategy", [""])[0] or "").strip()
         scope = (params.get("scope", [""])[0] or "").strip() or None
+        win_rate_min = _opt_float((params.get("win_rate_min", [""])[0] or "").strip())
+        profit_factor_min = _opt_float((params.get("profit_factor_min", [""])[0] or "").strip())
+        name_kw = (params.get("name_kw", [""])[0] or "").strip() or None
         ph = (params.get("params_hash", [""])[0] or "").strip() or None
         export = (params.get("export", [""])[0] or "").strip()
         sort_by = (params.get("sort_by", [""])[0] or "").strip() or None
@@ -1395,12 +1449,16 @@ class Handler(BaseHTTPRequestHandler):
             data = storage_repo.rank_runs(
                 strategy_name, ph, scope=scope, symbols=symbols, page=1, size=100000,
                 sort_by=sort_by, order=order,
+                win_rate_min=win_rate_min, profit_factor_min=profit_factor_min,
+                name_kw=name_kw,
             )
             self._send_csv(_ranks_to_csv(data["items"]), f"rank_{strategy_name}.csv")
             return
         data = storage_repo.rank_runs(
             strategy_name, ph, scope=scope, symbols=symbols, page=page, size=size,
             sort_by=sort_by, order=order,
+            win_rate_min=win_rate_min, profit_factor_min=profit_factor_min,
+            name_kw=name_kw,
         )
         if data["total"] == 0:
             latest = storage_repo.latest_batch_for_strategy(strategy_name, ph)
@@ -1808,7 +1866,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _ranks_to_csv(items: list[dict]) -> str:
     """把排名 items 转为 CSV 文本（含 BOM 供 Excel）。"""
-    cols = ["run_id", "symbol", "symbol_name", "total_return_pct", "max_drawdown_pct", "sharpe", "profit_factor", "last_buy_date", "end", "stale"]
+    cols = ["run_id", "symbol", "symbol_name", "total_return_pct", "max_drawdown_pct", "sharpe", "profit_factor", "last_open_date", "last_t_buy_date", "end", "stale"]
     lines = [",".join(cols)]
     for it in items:
         row = [
@@ -1819,7 +1877,8 @@ def _ranks_to_csv(items: list[dict]) -> str:
             "" if it.get("max_drawdown_pct") is None else f"{it['max_drawdown_pct']:.2f}",
             "" if it.get("sharpe") is None else f"{it['sharpe']:.2f}",
             "" if it.get("profit_factor") is None else f"{it['profit_factor']:.2f}",
-            it.get("last_buy_date", "") or "",
+            it.get("last_open_date", "") or "",
+            it.get("last_t_buy_date", "") or "",
             it.get("end", "") or "",
             "1" if it.get("stale") else "0",
         ]

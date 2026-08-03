@@ -67,6 +67,20 @@ def _safe_float(value: Any) -> float | None:
     return result
 
 
+def _fmt_date(value: Any) -> str | None:
+    """统一把聚合返回的日期（date/datetime/ISO 字符串）转为 ISO 字符串，None 透传。
+
+    MySQL 对 ``MAX(CASE...)`` 可能直接返回 ``'YYYY-MM-DD'`` 字符串，SQLite 返回
+    ``datetime.date``；这里做兼容归一，避免方言差异。
+    """
+    if value is None:
+        return None
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
+    text = str(value).strip()
+    return text if text else None
+
+
 def compute_params_hash(strategy_cfg: dict[str, Any]) -> str:
     """对策略配置做规范化 sha1 指纹（40 位十六进制）。
 
@@ -767,19 +781,27 @@ def rank_runs(
     size: int = 50,
     sort_by: str | None = None,
     order: str = "desc",
+    win_rate_min: float | None = None,
+    profit_factor_min: float | None = None,
+    name_kw: str | None = None,
 ) -> dict[str, Any]:
     """排名查询（分析页核心）：已落库 run 分页排序，默认按总收益率降序。
 
     - ``scope``：板块 code（按该板块聚合过滤）或 None/空（全部已跑过的）。
     - ``symbols``：自定义池 symbols（与 scope 互斥，优先于 scope）。
+    - ``win_rate_min``：胜率下限（%），None 不筛；仅保留 win_rate_pct 非 None 且 >= 下限的项。
+    - ``profit_factor_min``：盈亏比下限，None 不筛；仅保留 profit_factor 非 None 且 >= 下限的项。
+    - ``name_kw``：股票名称模糊关键字（大小写不敏感），None/空 不筛；
+      ``symbol_name`` 或 ``symbol`` 包含该关键字即命中。
     - ``sort_by``：排序字段白名单 ``symbol_name`` / ``total_return_pct`` /
-      ``max_drawdown_pct`` / ``sharpe`` / ``win_rate_pct`` / ``last_buy_date`` /
-      ``profit_factor``，
-      支持逗号分隔的多键组合排序（如 ``"last_buy_date,win_rate_pct"``，最多 3 个，
+      ``max_drawdown_pct`` / ``sharpe`` / ``win_rate_pct`` / ``last_open_date`` /
+      ``last_t_buy_date`` / ``last_buy_date`` / ``profit_factor``，
+      支持逗号分隔的多键组合排序（如 ``"last_open_date,win_rate_pct"``，最多 3 个，
       从左到右优先级递减）；``order`` 同步为逗号分隔的方向。为 None、空或全非法时
       保持默认排序（total_return_pct 降序，向后兼容）。
     - ``order``：方向，逗号分隔且与 ``sort_by`` 平行（``"asc"`` 升序 /
       ``"desc"`` 降序）；字段值为 None 的统一排到最后。
+    - 筛选在去重后执行（每个 symbol 一条后再过滤），total / 分页 / 排序均基于筛选后的集合。
     - 返回 ``{items, total, miss_count}``；``miss_count`` 仅当 scope 为板块 code 时有效。
     """
     init_db()
@@ -811,17 +833,32 @@ def rank_runs(
         )
 
         # FR-43：按 run_id 聚合 MAX(trades.entry_date)（一条分组聚合，避免 N+1）。
+        # FR-47：按 role 拆分「建仓(底仓)/做T」两条条件聚合（仍是一条分组 SQL，无 N+1）。
         # trades 仅 A 股多头（side='long' 固定），无需 side 过滤；无 trades 的 run → None。
         run_ids = [r.run_id for r in all_rows]
-        buy_map: dict[str, str | None] = {}
+        open_map: dict[str, str | None] = {}
+        tbuy_map: dict[str, str | None] = {}
+        buy_map: dict[str, str | None] = {}  # FR-43 兼容字段：建仓/做T 较新者
         if run_ids:
             sub = (
-                s.query(Trade.run_id, func.max(Trade.entry_date).label("last_buy_date"))
+                s.query(
+                    Trade.run_id,
+                    func.max(case((Trade.role == "底仓", Trade.entry_date))).label(
+                        "last_open_date"
+                    ),
+                    func.max(case((Trade.role == "做T", Trade.entry_date))).label(
+                        "last_t_buy_date"
+                    ),
+                )
                 .filter(Trade.run_id.in_(run_ids))
                 .group_by(Trade.run_id)
                 .all()
             )
-            buy_map = {rid: (d.isoformat() if d else None) for rid, d in sub}
+            for rid, od, td in sub:
+                open_map[rid] = _fmt_date(od)
+                tbuy_map[rid] = _fmt_date(td)
+                _cands = [d for d in (_fmt_date(od), _fmt_date(td)) if d]
+                buy_map[rid] = max(_cands) if _cands else None
 
         # FR-44：按 run_id 聚合计算盈亏比（Profit Factor = 总盈利 / 总亏损绝对值）。
         # 一条分组聚合避免 N+1；亏损总额为 0（全盈利）时 NULLIF 得 NULL → None（前端显示 "--"）。
@@ -873,7 +910,9 @@ def rank_runs(
                         if summ and summ.win_rate_pct is not None
                         else None
                     ),
-                    "last_buy_date": buy_map.get(r.run_id),  # FR-43：最近买入日期（ISO，无则为 None）
+                    "last_open_date": open_map.get(r.run_id),  # FR-47：最近建仓日期（role='底仓'，无则为 None）
+                    "last_t_buy_date": tbuy_map.get(r.run_id),  # FR-47：最近做T买入日期（role='做T'，无则为 None）
+                    "last_buy_date": buy_map.get(r.run_id),  # FR-43 兼容字段（建仓/做T 较新者，无则为 None）
                     "profit_factor": profit_map.get(r.run_id),  # FR-44：盈亏比（总盈利/总亏损绝对值，全盈利→None）
                     "end": r.end.isoformat() if r.end else None,
                     "stale": stale,
@@ -890,14 +929,36 @@ def rank_runs(
                 seen[sym] = item
         items = list(seen.values())
 
-        # 排序（在去重后的 items 上做，支持多键组合排序；None 统一排末尾）
+        # FR-46：筛选（在去重后的 items 上做，保证"每个 symbol 一条后再过滤"；
+        # 字段为 None 视为不满足条件，如 win_rate_pct 为 None 且要求 >50 → 排除）
+        if win_rate_min is not None:
+            items = [
+                it for it in items
+                if it["win_rate_pct"] is not None and it["win_rate_pct"] >= win_rate_min
+            ]
+        if profit_factor_min is not None:
+            items = [
+                it for it in items
+                if it["profit_factor"] is not None and it["profit_factor"] >= profit_factor_min
+            ]
+        if name_kw:
+            _kw = name_kw.lower()
+            items = [
+                it for it in items
+                if (it["symbol_name"] or "").lower().find(_kw) >= 0
+                or (it["symbol"] or "").lower().find(_kw) >= 0
+            ]
+
+        # 排序（在去重+筛选后的 items 上做，支持多键组合排序；None 统一排末尾）
         _ALLOWED_SORT = {
             "symbol_name",
             "total_return_pct",
             "max_drawdown_pct",
             "sharpe",
             "win_rate_pct",
-            "last_buy_date",  # FR-43：最近买入日期（NULL 统一排末尾，沿用 FR-20 规则）
+            "last_open_date",  # FR-47：最近建仓日期（NULL 统一排末尾，沿用 FR-20 规则）
+            "last_t_buy_date",  # FR-47：最近做T买入日期（NULL 统一排末尾，沿用 FR-20 规则）
+            "last_buy_date",  # FR-43 兼容字段：最近买入日期（NULL 统一排末尾）
             "profit_factor",  # FR-44：盈亏比（NULL 统一排末尾，沿用 FR-20 规则）
         }
 
