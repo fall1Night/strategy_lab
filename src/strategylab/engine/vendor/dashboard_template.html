@@ -3083,6 +3083,20 @@
         chV.setAttribute('stroke-width', '1');
         chV.setAttribute('stroke-dasharray', '3 3');
         ch.appendChild(chV);
+        // 横轴虚线 + 随鼠标价格标签（右侧跟随鼠标 Y 显示对应价格，仅限 K 线价格区）
+        const chH = svgEl('line');
+        chH.setAttribute('x1', PAD_L);
+        chH.setAttribute('x2', PAD_L + INNER_W);
+        chH.setAttribute('stroke', crosshairColor);
+        chH.setAttribute('stroke-width', '1');
+        chH.setAttribute('stroke-dasharray', '3 3');
+        ch.appendChild(chH);
+        const chPrice = svgEl('text');
+        chPrice.setAttribute('x', W - 6);
+        chPrice.setAttribute('text-anchor', 'end');
+        chPrice.setAttribute('font-size', 10);
+        chPrice.setAttribute('fill', crosshairColor);
+        ch.appendChild(chPrice);
         svg.appendChild(ch);
 
         const overlay = svgEl('rect');
@@ -3094,7 +3108,7 @@
         overlay.style.cursor = 'crosshair';
         svg.appendChild(overlay);
 
-        function showBarTooltip(clientX) {
+        function showBarTooltip(clientX, clientY) {
           const r = svgWrap.getBoundingClientRect();
           const x = clientX - r.left;
           if (x < PAD_L || x > PAD_L + INNER_W) {
@@ -3107,6 +3121,13 @@
           const cx = xPx(j);
           ch.style.display = '';
           chV.setAttribute('x1', cx); chV.setAttribute('x2', cx);
+          // 横轴虚线随鼠标移动，右侧标签显示鼠标 Y 对应的价格（clamp 在 K 线价格区内）
+          const yLocal = clientY != null ? clientY - r.top : priceBot;
+          const yClamped = clamp(yLocal, priceTop, priceBot);
+          chH.setAttribute('y1', yClamped); chH.setAttribute('y2', yClamped);
+          const priceVal = pMax - (yClamped - priceTop) / priceH * (pMax - pMin);
+          chPrice.setAttribute('y', yClamped + 4);
+          chPrice.textContent = nf(priceVal, 2);
 
           const d = ohlcByDate[date];
           const pt = pointByDate[date];
@@ -3116,6 +3137,18 @@
             rows += ttRow(t('price_high', '高'), nf(d.high, 2));
             rows += ttRow(t('price_low', '低'), nf(d.low, 2));
             rows += ttRow(t('price_close', '收'), nf(d.close, 2));
+            // 涨跌幅：沿日期轴向前找最近一个有 K 线数据的交易日作昨收基准
+            if (d.close != null) {
+              let prevD = null;
+              for (let k = gi - 1; k >= 0; k--) {
+                const pk = ohlcByDate[axisDates[k]];
+                if (pk && pk.close != null) { prevD = pk; break; }
+              }
+              if (prevD && prevD.close) {
+                const chg = (d.close - prevD.close) / prevD.close * 100;
+                rows += ttRow(t('price_change', '涨跌幅'), signed(chg, 2, '%'), chg >= 0 ? gainColor : lossColor);
+              }
+            }
             rows += ttRow(t('price_volume', '成交量'),
               d.volume != null && !isNaN(d.volume) ? fmtVol(d.volume) : t('price_no_vol', '成交量缺失'));
           }
@@ -3176,7 +3209,7 @@
             colorStyle + '>' + escapeHtml(String(val)) + '</span></div>';
         }
 
-        overlay.addEventListener('pointermove', function (e) { showBarTooltip(e.clientX); });
+        overlay.addEventListener('pointermove', function (e) { showBarTooltip(e.clientX, e.clientY); });
         overlay.addEventListener('pointerleave', function () {
           ch.style.display = 'none'; tooltip.classList.add('hidden');
         });
@@ -3573,6 +3606,20 @@
         chV.setAttribute('stroke-width', '1');
         chV.setAttribute('stroke-dasharray', '3 3');
         ch.appendChild(chV);
+        // 横轴虚线 + 随鼠标价格标签（右侧跟随鼠标 Y 显示对应价格）
+        const chH = svgEl('line');
+        chH.setAttribute('x1', PAD_L);
+        chH.setAttribute('x2', PAD_L + INNER_W);
+        chH.setAttribute('stroke', crosshairColor);
+        chH.setAttribute('stroke-width', '1');
+        chH.setAttribute('stroke-dasharray', '3 3');
+        ch.appendChild(chH);
+        const chPrice = svgEl('text');
+        chPrice.setAttribute('x', W - 6);
+        chPrice.setAttribute('text-anchor', 'end');
+        chPrice.setAttribute('font-size', 10);
+        chPrice.setAttribute('fill', crosshairColor);
+        ch.appendChild(chPrice);
         svg.appendChild(ch);
 
         const overlay = svgEl('rect');
@@ -3584,7 +3631,7 @@
         overlay.style.cursor = 'crosshair';
         svg.appendChild(overlay);
 
-        function showBarTooltip(clientX) {
+        function showBarTooltip(clientX, clientY) {
           const r = svgWrap.getBoundingClientRect();
           const x = clientX - r.left;
           if (x < PAD_L || x > PAD_L + INNER_W) {
@@ -3597,12 +3644,24 @@
           const cx = xPx(j);
           ch.style.display = '';
           chV.setAttribute('x1', cx); chV.setAttribute('x2', cx);
+          // 横轴虚线随鼠标移动，右侧标签显示鼠标 Y 对应的价格（clamp 在价格区内）
+          const yLocal = clientY != null ? clientY - r.top : priceBot;
+          const yClamped = clamp(yLocal, priceTop, priceBot);
+          chH.setAttribute('y1', yClamped); chH.setAttribute('y2', yClamped);
+          const priceVal = pMax - (yClamped - priceTop) / priceH * (pMax - pMin);
+          chPrice.setAttribute('y', yClamped + 4);
+          chPrice.textContent = nf(priceVal, 2);
 
           let rows = '<div class="tooltip-date">' + escapeHtml(d.date) + '</div>';
           rows += ttRow(t('price_open', '开'), nf(d.open, 2));
           rows += ttRow(t('price_high', '高'), nf(d.high, 2));
           rows += ttRow(t('price_low', '低'), nf(d.low, 2));
           rows += ttRow(t('price_close', '收'), nf(d.close, 2));
+          const prevBar = gi > 0 ? ohlc[gi - 1] : null;
+          if (prevBar && prevBar.close != null && d.close != null) {
+            const chg = (d.close - prevBar.close) / prevBar.close * 100;
+            rows += ttRow(t('price_change', '涨跌幅'), signed(chg, 2, '%'), chg >= 0 ? gainColor : lossColor);
+          }
           rows += ttRow(t('price_volume', '成交量'),
             d.volume != null && !isNaN(d.volume) ? fmtVol(d.volume) : t('price_no_vol', '成交量缺失'));
           markers.forEach(function (m) {
@@ -3653,7 +3712,7 @@
             colorStyle + '>' + escapeHtml(String(val)) + '</span></div>';
         }
 
-        overlay.addEventListener('pointermove', function (e) { showBarTooltip(e.clientX); });
+        overlay.addEventListener('pointermove', function (e) { showBarTooltip(e.clientX, e.clientY); });
         overlay.addEventListener('pointerleave', function () {
           ch.style.display = 'none'; tooltip.classList.add('hidden');
         });
