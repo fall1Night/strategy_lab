@@ -67,7 +67,8 @@ def _make_fetch_mock(captured: list | None = None) -> MagicMock:
     def fake(symbol, spec, period, beg, end, lmt):
         if captured is not None:
             captured.append((period, beg, end))
-        return _fake_klines_df()
+        # 2026-08-04 起 _try_fetch 返回 (df, source_name) 二元组（容灾切换感知）
+        return _fake_klines_df(), "akshare"
 
     return MagicMock(side_effect=fake)
 

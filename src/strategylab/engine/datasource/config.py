@@ -29,12 +29,14 @@ class DataSourceConfig:
 
     default_source: str = "eastmoney"
     symbol_overrides: dict[str, str] = field(default_factory=dict)
+    active_sources: list[str] = field(default_factory=list)
     fallback_order: list[str] = field(default_factory=list)
     failover_enabled: bool = True
     tushare_token: str | None = None
     min_fetch_gap: float = 2.0
     cb_enabled: bool = True
     network_timeout: float = 15.0
+    max_req_per_min: int = 30
 
     @staticmethod
     def from_env() -> "DataSourceConfig":
@@ -75,6 +77,17 @@ class DataSourceConfig:
         if raw_fallback.strip():
             fallback_order = [s.strip().lower() for s in raw_fallback.split(",") if s.strip()]
 
+        # 解析活跃源列表（多源轮询用，2026-08-04 新增）
+        # 不配置时默认只用 default_source（保持向后兼容）；配置多个源时，
+        # 请求按标的稳定分散到各源（如 akshare,tencent,eastmoney），
+        # 单源频率 = 总量/源数，显著降低触发 IP 限制的概率。
+        active_sources: list[str] = []
+        raw_active = os.environ.get("STRATEGALAB_ACTIVE_SOURCES", "")
+        if raw_active.strip():
+            active_sources = [s.strip().lower() for s in raw_active.split(",") if s.strip()]
+        if not active_sources:
+            active_sources = [default_source]
+
         failover_enabled = os.environ.get("STRATEGALAB_DATASOURCE_FAILOVER", "auto").strip().lower() != "off"
         cb_enabled = os.environ.get("STRATEGALAB_DATASOURCE_CB", "on").strip().lower() != "off"
         tushare_token = os.environ.get("STRATEGALAB_TUSHARE_TOKEN") or None
@@ -86,14 +99,22 @@ class DataSourceConfig:
             net_timeout = float(os.environ.get("STRATEGALAB_DATASOURCE_TIMEOUT", "15.0"))
         except (ValueError, TypeError):
             net_timeout = 15.0
+        try:
+            max_req_per_min = int(os.environ.get("STRATEGALAB_DATASOURCE_QPM", "30"))
+        except (ValueError, TypeError):
+            max_req_per_min = 30
+        if max_req_per_min <= 0:
+            max_req_per_min = 30
 
         return DataSourceConfig(
             default_source=default_source,
             symbol_overrides=symbol_overrides,
+            active_sources=active_sources,
             fallback_order=fallback_order,
             failover_enabled=failover_enabled,
             tushare_token=tushare_token,
             min_fetch_gap=gap,
             cb_enabled=cb_enabled,
             network_timeout=net_timeout,
+            max_req_per_min=max_req_per_min,
         )

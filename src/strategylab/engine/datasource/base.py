@@ -213,6 +213,7 @@ class DataSource(ABC):
     # ------------------------------------------------------------------
     _FETCH_LOCK: threading.Lock
     _LAST_FETCH_TS: float
+    _REQ_TS: list[float]          # 60s 滑动窗口请求时间戳（每分钟预算）
     _CB_LOCK: threading.Lock
     _CONSEC_FAIL: int
     _CB_COOLDOWN: float
@@ -221,6 +222,15 @@ class DataSource(ABC):
     _LAST_SUCCESS_TS: float
     _LAST_FAILURE_TS: float
 
+    # 防封参数（2026-08-04 保守化）：
+    #  - 连续失败阈值 3 次 → 熔断（与既有逻辑一致）
+    #  - 起始冷却 180s（原 60s），指数 ×2，上限 1800s（原 600s）——给被封 IP 足够休息
+    #  - 每源每分钟请求上限 30（默认；批量并发下限制 QPS≈0.5，降低被识别为爬虫的风险）
+    _CB_FAIL_THRESHOLD = 3
+    _CB_COOLDOWN_INIT = 180.0
+    _CB_COOLDOWN_MAX = 1800.0
+    _DEFAULT_MAX_REQ_PER_MIN = 30
+
     def __init__(self, name: str, config: "DataSourceConfig") -> None:  # noqa: F821
         self.name: str = name
         self.config: "DataSourceConfig" = config  # noqa: F821
@@ -228,12 +238,13 @@ class DataSource(ABC):
         # 每源独立限流
         self._FETCH_LOCK = threading.Lock()
         self._LAST_FETCH_TS = 0.0
+        self._REQ_TS: list[float] = []
 
-        # 每源独立熔断（阈值 4 次，起始冷却 60s，上限 600s）
+        # 每源独立熔断（阈值 3 次，起始冷却 180s，上限 1800s）
         self._CB_LOCK = threading.Lock()
         self._CONSEC_FAIL = 0
-        self._CB_COOLDOWN = 60.0
-        self._CB_COOLDOWN_MAX = 600.0
+        self._CB_COOLDOWN = self._CB_COOLDOWN_INIT
+        self._CB_COOLDOWN_MAX = self._CB_COOLDOWN_MAX
         self._CB_UNTIL = 0.0
 
         # 健康度追踪
@@ -410,14 +421,34 @@ class DataSource(ABC):
         )
 
     # ------------------------------------------------------------------
-    # 私有：每源限流
+    # 私有：每源限流 + 每分钟请求预算
     # ------------------------------------------------------------------
     def _throttle(self) -> None:
         """保证任意两次上游请求之间至少间隔 ``config.min_fetch_gap`` 秒，加随机抖动。
 
-        另有　10% 概率完全跳过本次请求（让请求节奏进一步稀疏化），
-        进一步降低被识别为爬虫的风险。
+        另有 10% 概率完全跳过本次请求（让请求节奏进一步稀疏化），降低被识别为爬虫的风险。
+
+        **每分钟请求预算（2026-08-04 防封增强）**：60s 滑动窗口内请求数达到
+        ``config.max_req_per_min``（默认 30）时**立即熔断冷却并快速失败**——
+        宁可切备用源，也不让本源的 IP 承受更高频率。批量并发（WORKERS=8）下
+        这是防止"高频抓取被封 IP"的最后一道闸。
         """
+        with self._FETCH_LOCK:
+            now = time.time()
+            # 滑动窗口：只保留最近 60s 的时间戳
+            self._REQ_TS = [t for t in self._REQ_TS if now - t < 60.0]
+            max_per_min = getattr(self.config, "max_req_per_min", self._DEFAULT_MAX_REQ_PER_MIN)
+            if len(self._REQ_TS) >= max_per_min:
+                # 预算耗尽 → 打开熔断冷却（下次 fetch_kline 的 _wait_circuit_breaker 会快速失败切源）
+                with self._CB_LOCK:
+                    self._CB_UNTIL = now + self._CB_COOLDOWN
+                    self._CB_COOLDOWN = min(self._CB_COOLDOWN * 2, self._CB_COOLDOWN_MAX)
+                raise DataSourceError(
+                    self.name,
+                    f"请求过于频繁（≥{max_per_min} 次/分钟），熔断冷却，交由备用源接管",
+                )
+            self._REQ_TS.append(now)
+
         # 10% 概率跳过本次请求
         if random.random() < 0.10:
             time.sleep(self.config.min_fetch_gap + random.uniform(0, 3.0))
@@ -435,25 +466,35 @@ class DataSource(ABC):
             self._LAST_FETCH_TS = time.time()
 
     def _wait_circuit_breaker(self) -> None:
-        """若处于熔断冷却中，则阻塞等待直到冷却结束。"""
+        """熔断打开时**快速失败**（抛错），由上层容灾链切到备用源。
+
+        旧实现是"阻塞等待冷却结束"（2026-08-04 实测缺陷）：熔断期间所有任务
+        堵在该源上排队等待，既拖慢批次，又让被封 IP 得不到真正的休息。
+        改为立即抛 ``DataSourceError``——``provider._try_fetch`` 的容灾链会捕获
+        并切到链上下一个源（如 tencent），被封源获得完整冷却期。
+        """
         if not self.config.cb_enabled:
             return
-        while True:
-            with self._CB_LOCK:
-                until = self._CB_UNTIL
-            sleep_needed = until - time.time()
-            if sleep_needed <= 0:
-                break
-            time.sleep(min(sleep_needed, 5))
+        with self._CB_LOCK:
+            until = self._CB_UNTIL
+        if until > time.time():
+            remain = int(until - time.time())
+            raise DataSourceError(
+                self.name,
+                f"数据源熔断冷却中（剩余 {remain}s），快速失败交由备用源接管",
+            )
 
     def _on_fetch_failure(self) -> None:
-        """记录一次失败；连续失败达阈值（8 次）则打开熔断。"""
+        """记录一次失败；连续失败达阈值（3 次）则打开熔断。
+
+        起始冷却 180s（原 60s），指数 ×2，上限 1800s——给被封 IP 足够长的休息。
+        """
         if not self.config.cb_enabled:
             return
         with self._CB_LOCK:
             self._CONSEC_FAIL += 1
             self._LAST_FAILURE_TS = time.time()
-            if self._CONSEC_FAIL >= 3:
+            if self._CONSEC_FAIL >= self._CB_FAIL_THRESHOLD:
                 self._CB_UNTIL = time.time() + self._CB_COOLDOWN
                 self._CB_COOLDOWN = min(self._CB_COOLDOWN * 2, self._CB_COOLDOWN_MAX)
                 self._CONSEC_FAIL = 0
@@ -462,6 +503,6 @@ class DataSource(ABC):
         """复位熔断/冷却状态。"""
         with self._CB_LOCK:
             self._CONSEC_FAIL = 0
-            self._CB_COOLDOWN = 60.0
+            self._CB_COOLDOWN = self._CB_COOLDOWN_INIT
             self._CB_UNTIL = 0.0
             self._LAST_SUCCESS_TS = time.time()

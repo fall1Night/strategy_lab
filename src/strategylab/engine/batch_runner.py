@@ -27,6 +27,7 @@ from .backtest import run_symbol
 from .data_feed import normalize_symbol, ensure_data
 from .datasource.config import DataSourceConfig
 from .datasource.factory import DataSourceFactory
+from .datasource.cache import KlineCache
 
 # 并发度（环境变量可配；IO 密集 8 路压满网络）
 WORKERS = int(os.environ.get("STRATEGALAB_BATCH_WORKERS", "8"))
@@ -76,16 +77,13 @@ def submit_batch(
     symbol_source_map: dict[str, str] = {}
     for sym in symbols:
         symbol_source_map[sym] = ds_factory.get_effective_source(sym)
-    # 用 majority source 作为清空维度（同批大多数标的同源）
-    source_for_lookup = (
-        max(set(symbol_source_map.values()), key=list(symbol_source_map.values()).count)
-        if symbol_source_map
-        else ds_cfg.default_source
-    )
 
-    # FR-42：回测前置清空该维度历史结果（策略全维度，不限所选范围），再全量重跑。
-    # 不再走 find_existing_runs 命中跳过；verify 模式缺数据由 _run_one 标记 failed。
-    repository.clear_strategy_runs(strategy_name, params_hash, source_for_lookup)
+    # FR-42：回测前置清空该策略维度历史结果（策略全维度，不限所选范围），再全量重跑。
+    # 修复（2026-08-04）：实际落库的 data_source 是「缓存优先」源（可能因容灾切换
+    # 与轮询源不同），只清 majority 会漏掉切换过源的标的旧结果 → 对**所有出现的源**
+    # 逐一清空，保证无残留。
+    for src in set(symbol_source_map.values()):
+        repository.clear_strategy_runs(strategy_name, params_hash, src)
 
     # 全量重跑：所有标的均为 pending（不再命中复用）
     batch_items: list[dict[str, Any]] = []
@@ -169,8 +167,15 @@ def submit_data_batch(
         today = datetime.date.today().strftime("%Y%m%d")
         for it in items:
             sym = it["symbol"]
-            eff = prov._factory.get_effective_source(sym)
             prefix = normalize_symbol(sym)["prefix"]
+            # 生效源 = 已有缓存源优先，与 provider.ensure_data 的「缓存优先、同股同源」
+            # 逻辑保持一致；无缓存才按 active_sources 轮询。
+            eff = prov._factory.get_effective_source(sym)
+            existing = prov._cache.find_existing_source(
+                out_dir_p, prefix, prov._config.active_sources
+            )
+            if existing is not None:
+                eff = existing
             d_meta, *_ = prov._cache._read_any_meta(out_dir_p, prefix, eff, "daily")
             w_meta, *_ = prov._cache._read_any_meta(out_dir_p, prefix, eff, "weekly")
             d_need = prov._cache._incremental_window(d_meta, today, "20200101") is not None
@@ -250,10 +255,18 @@ def _run_one(
     try:
         start = "2020-01-01"
         end = datetime.date.today().isoformat()
-        # P0-4：计算该标的的 effective source 并传入 run_symbol 落库
+        # 计算该标的的 effective source 并传入 run_symbol 落库。
+        # 注意与 provider.ensure_data 保持一致：**缓存优先、同股同源**——
+        # 已有缓存的标的用缓存源（轮询源可能与之不同，落库字段必须反映实际取数源）。
         ds_cfg = DataSourceConfig.from_env()
         ds_factory = DataSourceFactory(ds_cfg)
         effective_source = ds_factory.get_effective_source(symbol)
+        sym_cfg = normalize_symbol(symbol)
+        existing = KlineCache().find_existing_source(
+            Path(out_dir), sym_cfg["prefix"], ds_cfg.active_sources
+        )
+        if existing is not None:
+            effective_source = existing
         res = run_symbol(
             strategy_cfg, symbol, symbol_name, start, end, out_dir, batch_id=batch_id,
             data_source=effective_source,

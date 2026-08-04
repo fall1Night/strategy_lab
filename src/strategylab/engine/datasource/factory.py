@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from .base import DataSource
 from .config import DataSourceConfig
 from .exceptions import MissingDependencyError
@@ -93,24 +95,41 @@ class DataSourceFactory:
             raise ValueError(f"未知数据源: {name}，支持: eastmoney, akshare, tencent, tushare, broker")
 
     def get_effective_source(self, symbol: str) -> str:
-        """解析某标的的生效数据源名称。
+        """解析某标的的生效主源名称。
 
-        优先级：按品种覆盖 > 全局默认源。
+        优先级：按品种覆盖 > **活跃源稳定轮询** > 全局默认源。
+
+        多源轮询（2026-08-04，防 IP 限制）：配置了 ``active_sources``（如
+        ``akshare,tencent,eastmoney``）时，按 ``md5(symbol)`` 取模稳定分配到
+        其中一个源——同一标的永远落在同一源（缓存文件前缀一致、可复用），
+        不同标的均匀分散到各源，**单源只承担 1/N 的请求量**，显著降低任一源
+        被高频触发 IP 限制的概率。用 md5 而非内置 ``hash()``：后者受
+        PYTHONHASHSEED 影响，进程重启后同标的会漂移到不同源导致缓存分裂。
 
         Args:
             symbol: 标准化代码（如 ``600216.SH``）。
 
         Returns:
-            数据源名称（如 ``eastmoney``）。
+            数据源名称（如 ``akshare``）。
         """
         sym_clean = symbol.strip()
         # 按品种覆盖优先
         if sym_clean in self._config.symbol_overrides:
             return self._config.symbol_overrides[sym_clean]
-        return self._config.default_source
+        active = self._config.active_sources or [self._config.default_source]
+        if len(active) <= 1:
+            return active[0]
+        digest = hashlib.md5(sym_clean.encode("utf-8")).hexdigest()
+        idx = int(digest, 16) % len(active)
+        return active[idx]
 
     def build_chain(self, symbol: str) -> list[DataSource]:
-        """构建某标的的容灾链：[主源] + 备用源（去重，排除主源自身）。
+        """构建某标的的容灾链：主源 + 其他活跃源 + 备用源（去重，排除主源自身）。
+
+        链顺序（2026-08-04 多源轮询）：
+          1. 主源 = ``get_effective_source`` 轮询结果；
+          2. 其他活跃源（同轮询池内其余源，失败优先切它们，保持分散）；
+          3. ``fallback_order`` 备用源（如 tushare 等非活跃源）。
 
         备用源仅包含已成功加载的源；未安装/加载失败的源静默跳过。
 
@@ -118,7 +137,7 @@ class DataSourceFactory:
             symbol: 标准化代码。
 
         Returns:
-            ``[主源, 备用源1, 备用源2, ...]`` 的 ``DataSource`` 实例列表。
+            ``[主源, 活跃源2, 活跃源3, 备用源1, ...]`` 的 ``DataSource`` 实例列表。
         """
         primary_name = self.get_effective_source(symbol)
         chain: list[DataSource] = []
@@ -128,14 +147,24 @@ class DataSourceFactory:
         try:
             primary = self.get(primary_name, self._config)
         except MissingDependencyError:
-            # 主源都不可用 → 仅靠备用源
             primary = None
 
         if primary is not None:
             chain.append(primary)
             seen.add(primary.name)
 
-        # 追加备用源（跳过已在链中的）
+        # 追加其他活跃源（保持多源分散：主源挂了优先切活跃池内其他源）
+        for name in self._config.active_sources:
+            if name in seen:
+                continue
+            try:
+                ds = self.get(name, self._config)
+            except MissingDependencyError:
+                continue
+            chain.append(ds)
+            seen.add(ds.name)
+
+        # 追加 fallback_order 备用源
         for fb_name in self._config.fallback_order:
             if fb_name in seen:
                 continue

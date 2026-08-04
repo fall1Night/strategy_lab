@@ -7,12 +7,31 @@
 from __future__ import annotations
 
 import concurrent.futures as _cf
+import threading
 from typing import Any
 
 import pandas as pd
 
 from .base import DataSource, SymbolSpec
 from .exceptions import MissingDependencyError, DataSourceError, DataSourceUnavailableError
+
+# 模块级共享取数线程池（与 akshare_src/tencent_src 同方案，2026-08-04）：
+# 旧实现每次取数新建 ThreadPoolExecutor(max_workers=1) + shutdown(wait=False)
+# 会线程泄漏；共享池限流线程数上限，配合 result(timeout) 防单标的卡死。
+_FETCH_EXECUTOR: "_cf.ThreadPoolExecutor | None" = None
+_FETCH_EXECUTOR_LOCK: threading.Lock = threading.Lock()
+
+
+def _get_fetch_executor() -> "_cf.ThreadPoolExecutor":
+    """获取模块级共享取数线程池（懒加载单例）。"""
+    global _FETCH_EXECUTOR
+    if _FETCH_EXECUTOR is None:
+        with _FETCH_EXECUTOR_LOCK:
+            if _FETCH_EXECUTOR is None:
+                _FETCH_EXECUTOR = _cf.ThreadPoolExecutor(
+                    max_workers=4, thread_name_prefix="ts-fetch"
+                )
+    return _FETCH_EXECUTOR
 
 
 class TushareDataSource(DataSource):
@@ -97,26 +116,23 @@ class TushareDataSource(DataSource):
         end_clean = end.replace("-", "")[:8]
 
         try:
-            # tushare 内部网络请求无统一超时入口，用单线程包裹并设上限，
+            # tushare 内部网络请求无统一超时入口，用共享线程池包裹并设上限，
             # 避免单个标的取数卡死（无限等待）拖垮整个批次。
-            _ex = _cf.ThreadPoolExecutor(max_workers=1)
-            try:
-                _fut = _ex.submit(
-                    pro.daily,
-                    ts_code=ts_code,
-                    start_date=start_clean,
-                    end_date=end_clean,
-                    adj=adj,
-                )
-                df_raw = _fut.result(timeout=self.config.network_timeout)
-            except _cf.TimeoutError as _te:
-                raise DataSourceError(
-                    self.name,
-                    f"tushare 取数超时(>{self.config.network_timeout}s): {_te}",
-                ) from _te
-            finally:
-                # 非阻塞关闭：即便底层线程仍卡在请求上，也不阻塞当前批次任务。
-                _ex.shutdown(wait=False)
+            # 共享池（_get_fetch_executor）：线程数有上限，杜绝每次新建线程池
+            # + shutdown(wait=False) 造成的线程泄漏（与 akshare_src/tencent_src 同方案）。
+            _fut = _get_fetch_executor().submit(
+                pro.daily,
+                ts_code=ts_code,
+                start_date=start_clean,
+                end_date=end_clean,
+                adj=adj,
+            )
+            df_raw = _fut.result(timeout=self.config.network_timeout)
+        except _cf.TimeoutError as _te:
+            raise DataSourceError(
+                self.name,
+                f"tushare 取数超时(>{self.config.network_timeout}s): {_te}",
+            ) from _te
         except Exception as e:
             raise DataSourceError(self.name, f"tushare 取数失败: {type(e).__name__}: {e}") from e
 

@@ -254,6 +254,32 @@ def list_runs(
         return [_run_to_summary_dict(r) for r in q.all()]
 
 
+def get_run_meta(run_id: str) -> dict[str, Any] | None:
+    """轻量取 run 元数据（不含 equity/trades/summary 明细），用于提示类场景。
+
+    比 ``get_run`` 轻（不加载任何关系），仅含单行标的信息：
+    symbol/symbol_name/start/end/data_source/strategy_name 等。
+    """
+    init_db()
+    with get_session() as s:
+        run = (
+            s.query(BacktestRun)
+            .filter(BacktestRun.run_id == run_id)
+            .first()
+        )
+        if run is None:
+            return None
+        return {
+            "run_id": run.run_id,
+            "symbol": run.symbol,
+            "symbol_name": run.symbol_name,
+            "start": run.start.isoformat() if run.start else None,
+            "end": run.end.isoformat() if run.end else None,
+            "data_source": run.data_source,
+            "strategy_name": run.strategy_name,
+        }
+
+
 def list_runs_by_ids(run_ids: list[str]) -> list[dict[str, Any]]:
     """按给定 run_ids（保持顺序、去重）返回完整结果列表，用于跨 run 对比。"""
     init_db()

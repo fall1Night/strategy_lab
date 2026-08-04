@@ -146,8 +146,16 @@ class KlineProvider:
         symbol: str = symbol_cfg["symbol"]
         spec = SymbolSpec(symbol=symbol, secid=secid, prefix=prefix)
 
-        # 解析生效数据源
+        # 解析生效数据源：**缓存优先、同股同源**（2026-08-04）。
+        #  - 该标的已有某活跃源的缓存 → 固定复用该源（不因轮询换源重建缓存；
+        #    单文件数据源一致，避免跨源前复权价格跳变）。
+        #  - 无缓存（新股/首拉）→ 按 active_sources 轮询分散，多源分摊建缓存压力。
         effective_source = self._factory.get_effective_source(symbol)
+        existing_source = self._cache.find_existing_source(
+            out_dir, prefix, self._config.active_sources
+        )
+        if existing_source is not None:
+            effective_source = existing_source
 
         # 新格式 CSV 路径
         daily_csv = out_dir / f"{prefix}_{effective_source}_daily.csv"
@@ -291,12 +299,21 @@ class KlineProvider:
                     - self._cache._parse_yyyymmdd(daily_beg_calc)
                 ).days + 1
                 lmt = max(daily_lmt, (days + 10) * 2)
-                df_daily = self._try_fetch(
+                df_daily, src_d = self._try_fetch(
                     symbol, spec, "daily", daily_beg_calc, today, lmt
                 )
-                daily_csv = self._cache.merge(
-                    spec, effective_source, "daily", df_daily, out_dir
-                )
+                if src_d == effective_source:
+                    # 同源增量 merge（文件内数据源一致）
+                    daily_csv = self._cache.merge(
+                        spec, effective_source, "daily", df_daily, out_dir
+                    )
+                else:
+                    # 容灾切换了源：全量覆盖写新源文件（单文件单源，杜绝混源价格跳变），
+                    # 并收敛删除旧源缓存文件（同股磁盘上只保留 1 份）。
+                    daily_csv = self._cache.save(
+                        spec, src_d, "daily", df_daily, daily_beg_calc, today, out_dir
+                    )
+                    self._prune_other_sources(out_dir, prefix, src_d)
                 n_d = len(df_daily)
                 from .base import random_sleep
 
@@ -308,12 +325,18 @@ class KlineProvider:
                     - self._cache._parse_yyyymmdd(weekly_beg_calc)
                 ).days + 1
                 lmt = max(weekly_lmt, (days + 10) * 2)
-                df_weekly = self._try_fetch(
+                df_weekly, src_w = self._try_fetch(
                     symbol, spec, "weekly", weekly_beg_calc, today, lmt
                 )
-                weekly_csv = self._cache.merge(
-                    spec, effective_source, "weekly", df_weekly, out_dir
-                )
+                if src_w == effective_source:
+                    weekly_csv = self._cache.merge(
+                        spec, effective_source, "weekly", df_weekly, out_dir
+                    )
+                else:
+                    weekly_csv = self._cache.save(
+                        spec, src_w, "weekly", df_weekly, weekly_beg_calc, today, out_dir
+                    )
+                    self._prune_other_sources(out_dir, prefix, src_w)
                 n_w = len(df_weekly)
                 from .base import random_sleep
 
@@ -324,6 +347,42 @@ class KlineProvider:
             f"/ 周线 {n_w if need_weekly else '复用'} 条"
         )
         return daily_csv, weekly_csv
+
+    def _prune_other_sources(
+        self, out_dir: Path, prefix: str, keep_source: str
+    ) -> None:
+        """缓存收敛：删除该标的其他活跃源缓存文件（daily/weekly CSV + meta）。
+
+        容灾切换源成功写盘后调用——同股磁盘上只保留实际取数源的一份缓存，
+        避免多份文件堆积（用户视角"只在乎数据不在乎来源"，同股一份即可）。
+        删除失败静默忽略（不影响本次取数结果）。
+        """
+        for src in self._config.active_sources:
+            if src == keep_source:
+                continue
+            for period in ("daily", "weekly"):
+                for p in (
+                    self._cache._csv_path(out_dir, prefix, src, period),
+                    self._cache._meta_path(out_dir, prefix, src, period),
+                ):
+                    try:
+                        if p.exists():
+                            p.unlink()
+                    except OSError:
+                        pass
+        # 收敛 legacy 旧格式缓存（无源后缀，如 000001_sz_daily.csv，历史 eastmoney 缓存）
+        # ——切换源后旧格式文件同样不应残留（keep_source 为 eastmoney 时除外，本就指向它）。
+        if keep_source != "eastmoney":
+            for period in ("daily", "weekly"):
+                for p in (
+                    self._cache._legacy_csv_path(out_dir, prefix, period),
+                    self._cache._legacy_meta_path(out_dir, prefix, period),
+                ):
+                    try:
+                        if p.exists():
+                            p.unlink()
+                    except OSError:
+                        pass
 
     def _cache_csv_missing_volume(
         self,
@@ -467,22 +526,13 @@ class KlineProvider:
         beg: str,
         end: str,
         lmt: int,
-    ) -> pd.DataFrame:
+    ) -> "tuple[pd.DataFrame, str]":
         """尝试从容灾链取数，失败则按序切换并记录事件。
 
-        Args:
-            symbol: 标准化代码（如 ``600216.SH``）。
-            spec: ``SymbolSpec`` 实例。
-            period: ``"daily"`` / ``"weekly"``。
-            beg: 起始 YYYYMMDD。
-            end: 结束 YYYYMMDD。
-            lmt: 条数上限。
-
         Returns:
-            K 线 DataFrame。
-
-        Raises:
-            AllSourcesFailedError: 所有源均失败。
+            ``(df, source_name)``：K 线 DataFrame + **实际取数成功的源**。
+            ``source_name`` 供上层决定写哪个缓存文件：与生效源一致 → 增量 merge；
+            不一致（容灾切换）→ 全量覆盖写新源文件 + 收敛旧源缓存，保证单文件单源。
         """
         chain = self._factory.build_chain(symbol)
         if not chain:
@@ -507,7 +557,7 @@ class KlineProvider:
                     end,
                     lmt=lmt,
                 )
-                return df
+                return df, ds.name
             except (DataSourceError, Exception) as e:
                 err_msg = f"{type(e).__name__}: {e}"
                 errors.append((ds.name, err_msg))

@@ -36,6 +36,8 @@ from .engine.dashboard import build_compare_dashboard, build_compare_from_runs
 from .engine.vendor.render_dashboard import render_dashboard
 from .engine.search import search_a_stocks
 from .engine import batch_runner
+from .engine.datasource.base import normalize_symbol
+from .engine.datasource.cache import KlineCache
 from .engine.storage import repository as storage_repo
 from .engine.storage.repository import compute_params_hash
 from .settings import get_data_dir
@@ -145,6 +147,71 @@ def inject_back_button(html: str) -> str:
     if "</body>" in html:
         return html.replace("</body>", bar + "</body>", 1)
     return html + bar
+
+
+def _run_data_start_note(run_meta: dict | None) -> str | None:
+    """次新股提示：回测起点早于该股实际行情起点时，生成顶部提示条 HTML。
+
+    场景：603173（2023-01-30 上市）用 2020-01-01 起回测，上市前 3 年无行情，
+    曲线/图表只显示上市后部分，用户易误以为"数据只加载了一半"。
+    读缓存 meta 的 first 日与回测 start 比较，晚于则提示。
+
+    Returns:
+        提示 HTML 片段；数据正常 / 无法判定时返回 ``None``（不打扰）。
+    """
+    if not run_meta or not run_meta.get("symbol"):
+        return None
+    symbol = run_meta["symbol"]
+    start = (run_meta.get("start") or "").replace("-", "")
+    symbol_name = run_meta.get("symbol_name") or symbol
+    if not start or not start.isdigit():
+        return None
+    try:
+        out_dir = get_data_dir()
+        spec = normalize_symbol(symbol)
+        src = (run_meta.get("data_source") or "").strip() or "akshare"
+        meta, _src, _legacy = KlineCache()._read_any_meta(out_dir, spec.prefix, src, "daily")
+        if meta is None:
+            # 落库源缺失时按活跃源扫描，尽量找到实际缓存
+            from .engine.datasource.config import DataSourceConfig
+
+            found = KlineCache().find_existing_source(
+                out_dir, spec.prefix, DataSourceConfig.from_env().active_sources
+            )
+            if found:
+                meta, _src, _legacy = KlineCache()._read_any_meta(out_dir, spec.prefix, found, "daily")
+        first = (meta or {}).get("first") or (meta or {}).get("beg")
+        if not first:
+            return None
+        first_str = str(first).replace("-", "")
+        if not first_str.isdigit():
+            return None
+        # 容差 15 天：老股数据首日与回测起点仅差 1~2 个交易日属正常对齐，不提示；
+        # 只有真正"晚了半个月以上"（次新股上市晚）才提示。
+        from datetime import date as _date
+
+        try:
+            gap_days = (_date(int(first_str[:4]), int(first_str[4:6]), int(first_str[6:8]))
+                        - _date(int(start[:4]), int(start[4:6]), int(start[6:8]))).days
+        except ValueError:
+            return None
+        if gap_days <= 15:
+            return None
+        # 上市日 → 可读格式 YYYY-MM-DD
+        first_disp = f"{first_str[:4]}-{first_str[4:6]}-{first_str[6:8]}"
+        note = (
+            '<div style="position:fixed;top:10px;left:14px;right:auto;max-width:min(720px,calc(100vw - 220px));'
+            'z-index:99998;background:#3b2f10;border:1px solid #a16207;color:#fde68a;'
+            'padding:10px 14px;border-radius:9px;'
+            'font:13px/1.5 system-ui,-apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.35)">'
+            f'⚠️ <b>{symbol_name}（{symbol}）</b> 于 <b>{first_disp}</b> 上市，'
+            f'历史行情自上市日起，回测起点 {start[:4]}-{start[4:6]}-{start[6:8]} 之前无数据，'
+            "曲线从上市日之后开始属正常现象。"
+            "</div>"
+        )
+        return note
+    except Exception:  # noqa: BLE001 提示是增强项，任何异常静默降级
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -1661,6 +1728,11 @@ class Handler(BaseHTTPRequestHandler):
             os.unlink(tmp)
         except OSError:
             pass
+        # 次新股提示：回测起点早于上市日时给出说明，避免误读为"数据未加载完"
+        run_meta = storage_repo.get_run_meta(run_id)
+        note = _run_data_start_note(run_meta)
+        if note and "<body" in html:
+            html = html.replace("<body", f"<body>\n{note}", 1)
         self._send_html(inject_back_button(html))
 
     # ---- 路由 ----
@@ -1889,19 +1961,77 @@ def _ranks_to_csv(items: list[dict]) -> str:
 
 
 def _expand_all_market() -> list[dict]:
-    """展开全部 31 板块成分股（去重，带 sector_code）。"""
+    """展开全部 31 板块成分股（去重，带 sector_code）。
+
+    FR（2026-08-04 更新范围修复）：并入**磁盘已有缓存的标的**
+    （``data/*_daily.csv`` 前缀并集），保证历史上创建过缓存、但已不在 31 板块
+    列表中的标的（如板块成分调整后退出的股票）也能被「更新数据源」覆盖，
+    避免其数据永久停留在旧日期（实测 902 只旧缓存停在 2026-07-17）。
+    """
     stocks = storage_repo.get_sector_stocks()
     items: list[dict] = []
     seen: set[str] = set()
     for code, lst in stocks.items():
         for st in lst:
-            sym = st["code"]
+            # 板块 code 为 sh603233 / sz300763 格式，统一 normalize 为 603233.SH，
+            # 与缓存并集格式一致，避免同一标的被提交两次。
+            # 注意：normalize_symbol 返回 SymbolSpec（dataclass），用 .symbol 属性访问。
+            try:
+                sym = normalize_symbol(st["code"]).symbol
+            except Exception:  # noqa: BLE001
+                continue
             if sym in seen:
                 continue
             seen.add(sym)
             items.append(
                 {"symbol": sym, "symbol_name": st.get("name", sym), "sector_code": code}
             )
+
+    # 并入磁盘已有缓存的标的（所有活跃源的新格式缓存，如 akshare/tencent/eastmoney；
+    # 不含 legacy 旧格式——legacy 是历史 eastmoney 缓存，回测时会按需自动全量首拉，
+    # 纳入 all_market 只会引发无谓全量）。
+    # 修复（2026-08-04）：多源轮询后新股可能建 tencent/eastmoney 缓存，只 glob
+    # default_source 会漏掉这些标的 → 遍历 active_sources 全部纳入。
+    import re as _re
+
+    from .engine.datasource.config import DataSourceConfig
+    from .settings import get_data_dir
+
+    _cfg = DataSourceConfig.from_env()
+    data_dir = Path(get_data_dir())
+    cached_syms: set[str] = set()
+    if data_dir.is_dir():
+        for _src in _cfg.active_sources:
+            _PREFIX_RE = _re.compile(
+                rf"^(\d{{6}})_(sh|sz|bj)_{_re.escape(_src)}_daily\.csv$"
+            )
+            try:
+                for p in data_dir.glob(f"*_{_src}_daily.csv"):
+                    m = _PREFIX_RE.match(p.name)
+                    if m:
+                        cached_syms.add(f"{m.group(1)}.{m.group(2).upper()}")
+            except OSError:
+                continue  # 磁盘不可读不应阻断板块列表
+
+    # 缓存补充的标的往往不在板块列表（如 000001.SZ），无名称来源；用东财全市场
+    # 列表（search._get_universe，10 分钟缓存）补全 symbol→name，查不到退回代码。
+    _name_map: dict[str, str] = {}
+    try:
+        from .engine.search import _get_universe
+
+        _name_map = {it["symbol"]: it["name"] for it in _get_universe()}
+    except Exception:  # noqa: BLE001  联网失败不阻断，退回代码显示
+        _name_map = {}
+
+    for sym in sorted(cached_syms - seen):
+        seen.add(sym)
+        items.append(
+            {
+                "symbol": sym,
+                "symbol_name": _name_map.get(sym, sym),
+                "sector_code": None,
+            }
+        )
     return items
 
 

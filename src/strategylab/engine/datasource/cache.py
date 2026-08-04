@@ -110,20 +110,27 @@ class KlineCache:
         用于 update 模式下的存量缓存健康检查 —— 只读 CSV 头 + 抽查少量行
         （``nrows=5``），不做全文件扫描，2181 个标的批量跑时保持轻量。
 
+        FR（2026-08-04 vol 误判修复）：改为抽查**尾部**（最近 5 行）而非头部。
+        旧实现抽查头部前 5 行：历史旧缓存头部（2019 年段）无 vol，而增量 merge
+        只补充尾部 vol → 头部永远判定缺失 → 每次更新都触发 [vol修复] 强制全量
+        重拉且永不"自愈"。尾部抽查：增量 merge 后尾部必有 vol → 判定为有数据
+        → 走正常增量路径；完全无 vol 列/全空的旧缓存（如 7/18 创建的 4 列 CSV）
+        仍判定缺失，触发一次全量补齐后自愈为增量。
+
         Returns:
-            ``True`` = 有 ``vol`` 列且抽查行含非空 vol；``False`` = 文件不存在
-            / 无 vol 列 / 抽查行 vol 全空（NaN/空串） / 读取失败。
+            ``True`` = 有 ``vol`` 列且最近 5 行含非空 vol；``False`` = 文件不存在
+            / 无 vol 列 / 尾部 vol 全空（NaN/空串） / 读取失败。
         """
         path = Path(csv_path)
         if not path.exists():
             return False
         try:
-            sample = pd.read_csv(path, nrows=5)
+            df = pd.read_csv(path)
         except (ValueError, OSError, pd.errors.ParserError):
             return False
-        if "vol" not in sample.columns or sample.empty:
+        if "vol" not in df.columns or df.empty:
             return False
-        return bool(sample["vol"].notna().any())
+        return bool(df["vol"].tail(5).notna().any())
 
     # ------------------------------------------------------------------
     # 区间覆盖判断（沿用既有 _covers 逻辑）
@@ -159,6 +166,28 @@ class KlineCache:
             except (ValueError, OverflowError):
                 pass
         return False
+
+    # ------------------------------------------------------------------
+    # 缓存源探测（多源轮询下"缓存优先、同股同源"）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def find_existing_source(
+        out_dir: Path, prefix: str, candidates: list[str], period: str = "daily"
+    ) -> str | None:
+        """返回该标的**已存在缓存文件**的数据源（按 ``candidates`` 顺序），无则 ``None``。
+
+        设计（2026-08-04 多源轮询）：缓存按源分文件是为了保证**单文件数据源一致**
+        （不同源前复权价格不同，混源 merge 会跳变）。但同一标的应尽量只有一个源
+        的缓存——已有缓存的标的固定复用该源（不因轮询换源重建），仅**无缓存的新股**
+        才由上层轮询分散建缓存。本方法在 ``candidates`` 里找第一个已有
+        ``<prefix>_<source>_<period>.csv`` 的源；eastmoney 兼容 legacy 旧格式。
+        """
+        for src in candidates:
+            if KlineCache._csv_path(out_dir, prefix, src, period).exists():
+                return src
+            if src == "eastmoney" and KlineCache._legacy_csv_path(out_dir, prefix, period).exists():
+                return src
+        return None
 
     # ------------------------------------------------------------------
     # 增量更新辅助（FR-39：append 而非整文件覆盖）
@@ -417,6 +446,25 @@ class KlineCache:
     # 原子写工具（沿用既有临时文件 + os.replace 方案）
     # ------------------------------------------------------------------
     @staticmethod
+    def _atomic_replace(tmp: "Path | str", target: "Path | str", retries: int = 3) -> None:
+        """原子替换临时文件到目标路径，失败重试（缓解 WinError 5）。
+
+        FR（2026-08-04）：批量更新时偶发 ``[WinError 5] 拒绝访问``
+        （tmp → CSV 重命名被占用 / 杀毒软件实时扫描锁定），重试 3 次 +
+        短退避（0.3s / 0.6s / 0.9s），最后一次失败原样抛出。
+        """
+        import time as _time
+
+        for attempt in range(retries):
+            try:
+                os.replace(tmp, target)
+                return
+            except OSError:
+                if attempt == retries - 1:
+                    raise
+                _time.sleep(0.3 * (attempt + 1))
+
+    @staticmethod
     def _atomic_write_csv(df: pd.DataFrame, csv_path: Path) -> int:
         """把 DataFrame 原子写入 CSV（含可选 vol 列，缺失写为空）。"""
         lines: list[str] = ["date,open,high,low,close,vol"]
@@ -440,7 +488,7 @@ class KlineCache:
         try:
             tmp.write(content)
             tmp.close()
-            os.replace(tmp.name, csv_path)
+            KlineCache._atomic_replace(tmp.name, csv_path)
         finally:
             if os.path.exists(tmp.name):
                 try:
@@ -458,7 +506,7 @@ class KlineCache:
         try:
             tmp.write(json.dumps(meta, ensure_ascii=False, indent=2))
             tmp.close()
-            os.replace(tmp.name, meta_path)
+            KlineCache._atomic_replace(tmp.name, meta_path)
         finally:
             if os.path.exists(tmp.name):
                 try:
