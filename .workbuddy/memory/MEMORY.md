@@ -13,3 +13,9 @@
 - **回测"已更新数据源却仍联网"根因（FR-55 已修复）**：旧行为：`cache._covers(meta,beg,end)` 要求 `meta.end >= end`。快速回测表单 end 默认填"今天"，缓存末日永远是最后交易日（<今天），导致每次 verify 都失败 → DataMissingError → update 模式联网重拉。**FR-55 修复**：`_covers` 新增 `end_tolerance_days` 参数（默认0保持兼容），`_ensure_verify` 使用 `VERIFY_END_TOLERANCE_DAYS=7` 容忍末日滞后。修改仅影响 verify 路径（快速回测），数据生产端（update 模式）不动。
 - **FR-55 补充——新股首日容差**：末日容差修了之后，2026年上市的新股（如301531）仍重复拉取。根因是 `_covers` 的 `mb <= beg` 检查对新股永远为 False（缓存首日=IPO日 > GENESIS=20200101），end 容差没机会执行。修复：`provider.py` 新增 `_end_within_tolerance()` 静态方法，`_ensure_verify` 中 `_covers` 失败后若 meta 存在则回退为仅检查末日容差——数据源本来就没有 IPO 前的数据，只要末日足够新即视为可用。
 - **多键组合排序正确姿势（重要）**：`repository.rank_runs` 做多键稳定排序时，必须从**最低优先级往最高优先级**排（循环 `reversed(_rules)`），靠 Python 稳定排序保住高优先级键顺序，次级键仅在"高优先级相等"时破平。**禁止**按优先级正序排（会让次级键主导全局）。且排序前须先取出"主键缺失"行（`null_primary=[x for x in items if x.get(primary_key) is None]`）保留查询序、最后 `items=head+tail+_null_primary` 附加，否则缺失行会被次级键重排（违背 FR-20/FR-43"主键缺失行保持查询序"设计）。白名单 `_ALLOWED_SORT` 含 `last_buy_date` 等；最多取前 3 键。
+
+## 金融数据工具（westock-mcp / tdx-connector）
+- **westock-mcp `tool_filter` 后端不可用**：`tool_filter`（高级选股/preset）调用稳定返回 `高级选股异常：error_type=2 msg=service error`，疑似该接口故障。**替代方案**：用 `tool_ranking`（metric=CompScore/fin_profit/fin_growth/fin_valuation/PE 等，支持 `universe` 板块码）做量化筛选，结论不受影响。
+- **板块码前缀规则**：`data_sector` 取成分股/子行业时，申万一级用 `sw1_pt01801050`（有色金属），申万二级必须带 `sw2_` 前缀（如 `sw2_pt01801053` 贵金属）；裸码 `pt01801053` 会报 service error。
+- **有效排行指标（tool_ranking metric）**：CompScore/FunmScore/RiskScore/TecScore/CapScore（评分组）；fin_profit(盈利/RoeTTM)/fin_growth(成长/营收增速)/fin_valuation(估值/PE_TTM)/fin_cash_size/fin_liquidity/fin_operation/fin_pershare（财务排行组）。`PE`/`DividendYield` 不是合法 metric 名。
+- `data_quote` 支持 `codes` 逗号批量，返回现价/pe_ratio/pe_fwd/pb_ratio/dividend_ratio_ttm/total_market_cap/high_52week/low_52week/chg_ytd 等，可直接锚定目标价。
