@@ -1,0 +1,26 @@
+# =====================================================================
+# 策略配置：RSI 超买超卖
+# ---------------------------------------------------------------------
+# 移植自 OSkhQuant 的「RSI策略」示例。RSI(period) 上穿超卖阈值(默认30)
+# 且无持仓→买入；下穿超买阈值(默认70)且有持仓→清仓。
+#   - name   : 展示用名称
+#   - type   : 对应 engine/strategies/rsi.py 的 type 字段
+#   - market : china_a / us_stock / hong_kong
+# 运行示例见 README.md
+# =====================================================================
+
+name = "RSI超买超卖"
+type = "rsi"
+market = "china_a"
+description = "RSI(14)上穿30买入, 下穿70清仓; 单笔底仓, T+1/整手/前复权。"
+
+[params]
+initial_cash = 200000          # 初始资金(元)
+rsi_period = 14               # RSI 计算周期
+oversold = 30                 # 超卖阈值(上穿买入)
+overbought = 70               # 超买阈值(下穿清仓)
+buy_ratio = 0.5               # 买入占可用资金比例
+commission = 0.0003           # 佣金(双边, 比例)
+stamp_tax = 0.0005            # 印花税(仅卖方, 比例)
+lot_size = 100                # A股每手股数
+execution = "same_day_close"  # 执行价: 当日信号+当日收盘(含 look-ahead 偏差)

@@ -1,0 +1,25 @@
+# =====================================================================
+# 策略配置：双均线（金叉买入 / 死叉卖出）
+# ---------------------------------------------------------------------
+# 移植自 OSkhQuant 的「双均线精简」示例。MA(short) 上穿 MA(long) 金叉
+# 当日收盘买入，下穿死叉当日收盘清仓；单笔底仓，同一时间仅持一笔。
+#   - name   : 展示用名称
+#   - type   : 对应 engine/strategies/dual_ma.py 的 type 字段
+#   - market : china_a / us_stock / hong_kong
+# 运行示例见 README.md
+# =====================================================================
+
+name = "双均线(金叉买/死叉卖)"
+type = "dual_ma"
+market = "china_a"
+description = "MA(5)上穿MA(20)金叉买入, 下穿死叉清仓; 单笔底仓, T+1/整手/前复权。"
+
+[params]
+initial_cash = 200000          # 初始资金(元)
+buy_amount = 100000           # 单笔买入额(元)
+short_period = 5              # 短期均线周期
+long_period = 20              # 长期均线周期
+commission = 0.0003           # 佣金(双边, 比例)
+stamp_tax = 0.0005            # 印花税(仅卖方, 比例)
+lot_size = 100                # A股每手股数
+execution = "same_day_close"  # 执行价: 当日信号+当日收盘(含 look-ahead 偏差)

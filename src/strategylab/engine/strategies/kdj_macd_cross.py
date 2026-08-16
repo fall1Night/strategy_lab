@@ -55,12 +55,6 @@ class KdjMacdCross(BaseStrategy):
         )
 
     # ------------------------------------------------------------------ helpers
-    def _fee_cost(self, size, price):
-        return size * price * (1 + self.commission)
-
-    def _fee_proceeds(self, size, price):
-        return size * price * (1 - self.commission - self.stamp_tax)
-
     def _close_base(self, base_trade, exit_price, exit_date, exit_bar, trade_history, label="底仓(清仓)"):
         size = base_trade["size"]
         entry_price = base_trade["entry_price"]

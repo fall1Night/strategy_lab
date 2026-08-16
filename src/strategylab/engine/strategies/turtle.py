@@ -63,16 +63,8 @@ class TurtleStrategy(BaseStrategy):
         )
 
     # ------------------------------------------------------------------ helpers
-    # 以下三个方法 / 静态方法与 KdjMacdDualEntry 完全一致（费税模型、成交明细结构、
-    # positions 合并结构必须对齐，否则前端明细表渲染会崩）。改策略时请保持原样。
-    def _fee_cost(self, size, price):
-        """买入成本（含佣金，A股印花税仅卖方）。"""
-        return size * price * (1 + self.commission)
-
-    def _fee_proceeds(self, size, price):
-        """卖出回款（扣佣金 + 印花税）。"""
-        return size * price * (1 - self.commission - self.stamp_tax)
-
+    # 以下 _close_base / positions 合并结构与 KdjMacdDualEntry 完全一致，改策略时请保持原样。
+    # 费税计算已上移至 BaseStrategy（统一走 trading_cost 模块）。
     def _close_base(self, base_trade, exit_price, exit_date, exit_bar, trade_history, label="底仓清仓"):
         """写一笔底仓平仓到 trade_history，返回回款 proceeds。"""
         size = base_trade["size"]

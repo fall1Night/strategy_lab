@@ -809,6 +809,7 @@ def rank_runs(
     order: str = "desc",
     win_rate_min: float | None = None,
     profit_factor_min: float | None = None,
+    sharpe_min: float | None = None,
     name_kw: str | None = None,
 ) -> dict[str, Any]:
     """排名查询（分析页核心）：已落库 run 分页排序，默认按总收益率降序。
@@ -817,6 +818,7 @@ def rank_runs(
     - ``symbols``：自定义池 symbols（与 scope 互斥，优先于 scope）。
     - ``win_rate_min``：胜率下限（%），None 不筛；仅保留 win_rate_pct 非 None 且 >= 下限的项。
     - ``profit_factor_min``：盈亏比下限，None 不筛；仅保留 profit_factor 非 None 且 >= 下限的项。
+    - ``sharpe_min``：夏普比下限，None 不筛；仅保留 sharpe 非 None 且 >= 下限的项。
     - ``name_kw``：股票名称模糊关键字（大小写不敏感），None/空 不筛；
       ``symbol_name`` 或 ``symbol`` 包含该关键字即命中。
     - ``sort_by``：排序字段白名单 ``symbol_name`` / ``total_return_pct`` /
@@ -832,7 +834,9 @@ def rank_runs(
     """
     init_db()
     page = max(1, int(page))
-    size = max(1, min(500, int(size)))
+    # 上限放开到 100000：统计面板需要一次性拉全量（见 web.loadStats），
+    # 实际单策略 run 数远小于此；rank 表与 CSV 仍按各自请求的 size 取。
+    size = max(1, min(100000, int(size)))
 
     scope_is_sector = False
     if not symbols and scope:
@@ -861,51 +865,58 @@ def rank_runs(
         # FR-43：按 run_id 聚合 MAX(trades.entry_date)（一条分组聚合，避免 N+1）。
         # FR-47：按 role 拆分「建仓(底仓)/做T」两条条件聚合（仍是一条分组 SQL，无 N+1）。
         # trades 仅 A 股多头（side='long' 固定），无需 side 过滤；无 trades 的 run → None。
-        run_ids = [r.run_id for r in all_rows]
+        # 直接用 JOIN backtest_runs 按 strategy_name+params_hash 聚合（等价于 IN(run_ids)，
+        # 但避免把上千个 run_id 展开成 IN 列表，查询更稳更快）。
         open_map: dict[str, str | None] = {}
         tbuy_map: dict[str, str | None] = {}
         buy_map: dict[str, str | None] = {}  # FR-43 兼容字段：建仓/做T 较新者
-        if run_ids:
-            sub = (
-                s.query(
-                    Trade.run_id,
-                    func.max(case((Trade.role == "底仓", Trade.entry_date))).label(
-                        "last_open_date"
-                    ),
-                    func.max(case((Trade.role == "做T", Trade.entry_date))).label(
-                        "last_t_buy_date"
-                    ),
-                )
-                .filter(Trade.run_id.in_(run_ids))
-                .group_by(Trade.run_id)
-                .all()
+        sub = (
+            s.query(
+                Trade.run_id,
+                func.max(case((Trade.role == "底仓", Trade.entry_date))).label(
+                    "last_open_date"
+                ),
+                func.max(case((Trade.role == "做T", Trade.entry_date))).label(
+                    "last_t_buy_date"
+                ),
             )
-            for rid, od, td in sub:
-                open_map[rid] = _fmt_date(od)
-                tbuy_map[rid] = _fmt_date(td)
-                _cands = [d for d in (_fmt_date(od), _fmt_date(td)) if d]
-                buy_map[rid] = max(_cands) if _cands else None
+            .join(BacktestRun, BacktestRun.run_id == Trade.run_id)
+            .filter(
+                BacktestRun.strategy_name == strategy_name,
+                BacktestRun.params_hash == params_hash,
+            )
+            .group_by(Trade.run_id)
+            .all()
+        )
+        for rid, od, td in sub:
+            open_map[rid] = _fmt_date(od)
+            tbuy_map[rid] = _fmt_date(td)
+            _cands = [d for d in (_fmt_date(od), _fmt_date(td)) if d]
+            buy_map[rid] = max(_cands) if _cands else None
 
         # FR-44：按 run_id 聚合计算盈亏比（Profit Factor = 总盈利 / 总亏损绝对值）。
         # 一条分组聚合避免 N+1；亏损总额为 0（全盈利）时 NULLIF 得 NULL → None（前端显示 "--"）。
         profit_map: dict[str, float | None] = {}
-        if run_ids:
-            pf_sub = (
-                s.query(
-                    Trade.run_id,
-                    (
-                        func.sum(case((Trade.pnl > 0, Trade.pnl), else_=0))
-                        / func.nullif(
-                            func.abs(func.sum(case((Trade.pnl < 0, Trade.pnl), else_=0))),
-                            0,
-                        )
-                    ).label("profit_factor"),
-                )
-                .filter(Trade.run_id.in_(run_ids))
-                .group_by(Trade.run_id)
-                .all()
+        pf_sub = (
+            s.query(
+                Trade.run_id,
+                (
+                    func.sum(case((Trade.pnl > 0, Trade.pnl), else_=0))
+                    / func.nullif(
+                        func.abs(func.sum(case((Trade.pnl < 0, Trade.pnl), else_=0))),
+                        0,
+                    )
+                ).label("profit_factor"),
             )
-            profit_map = {rid: (float(pf) if pf is not None else None) for rid, pf in pf_sub}
+            .join(BacktestRun, BacktestRun.run_id == Trade.run_id)
+            .filter(
+                BacktestRun.strategy_name == strategy_name,
+                BacktestRun.params_hash == params_hash,
+            )
+            .group_by(Trade.run_id)
+            .all()
+        )
+        profit_map = {rid: (float(pf) if pf is not None else None) for rid, pf in pf_sub}
 
         items: list[dict[str, Any]] = []
         today = datetime.date.today()
@@ -966,6 +977,11 @@ def rank_runs(
             items = [
                 it for it in items
                 if it["profit_factor"] is not None and it["profit_factor"] >= profit_factor_min
+            ]
+        if sharpe_min is not None:
+            items = [
+                it for it in items
+                if it["sharpe"] is not None and it["sharpe"] >= sharpe_min
             ]
         if name_kw:
             _kw = name_kw.lower()

@@ -1,0 +1,3 @@
+/usr/bin/bash: line 1: nohup: command not found
+2026-08-04 19:15:25,476 [INFO] strategylab.engine.batch_runner: 重启处理：1 个 running 批次标记为 interrupted，2202 个 item 标记为 cancelled
+2026-08-04 19:15:25,480 [INFO] strategylab.web: 量化回测服务已启动 → http://localhost:8000 (Ctrl+C 停止)

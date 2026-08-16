@@ -1005,6 +1005,10 @@ __STRAT_OPTS__
         <input id="profit-factor-min" type="number" min="0" step="0.1" placeholder="如 2">
       </div>
       <div class="f-item">
+        <label for="sharpe-min">夏普比下限</label>
+        <input id="sharpe-min" type="number" step="0.1" placeholder="如 2">
+      </div>
+      <div class="f-item">
         <label for="name-kw">股票名称</label>
         <input id="name-kw" type="text" placeholder="模糊匹配，如 科技">
       </div>
@@ -1044,7 +1048,7 @@ __STRAT_OPTS__
   </div>
 </div>
 <script>
-var curStrategy='', curWinRateMin='', curProfitFactorMin='', curNameKw='';
+var curStrategy='', curWinRateMin='', curProfitFactorMin='', curSharpeMin='', curNameKw='';
 // —— 组合排序（多键排序）核心状态：curSortRules 为 [{key,dir}, ...]，最多 3 条 ——
 var SORT_FIELDS=[['symbol_name','股票名称'],['total_return_pct','总收益率'],['max_drawdown_pct','最大回撤'],['sharpe','夏普'],['win_rate_pct','胜率'],['profit_factor','盈亏比'],['last_open_date','最近建仓'],['last_t_buy_date','最近做T']];
 var SORT_WHITELIST={'symbol_name':1,'total_return_pct':1,'max_drawdown_pct':1,'sharpe':1,'win_rate_pct':1,'profit_factor':1,'last_open_date':1,'last_t_buy_date':1};
@@ -1138,6 +1142,7 @@ function loadRank(page){
   curStrategy=document.getElementById('strategy').value;
   curWinRateMin=document.getElementById('win-rate-min').value.trim();
   curProfitFactorMin=document.getElementById('profit-factor-min').value.trim();
+  curSharpeMin=document.getElementById('sharpe-min').value.trim();
   curNameKw=document.getElementById('name-kw').value.trim();
   var qs='strategy='+encodeURIComponent(curStrategy)
     +'&page='+page+'&size=50'
@@ -1145,6 +1150,7 @@ function loadRank(page){
     +'&order='+encodeURIComponent(curSortRules.map(function(r){return r.dir;}).join(','));
   if(curWinRateMin!=='') qs+='&win_rate_min='+encodeURIComponent(curWinRateMin);
   if(curProfitFactorMin!=='') qs+='&profit_factor_min='+encodeURIComponent(curProfitFactorMin);
+  if(curSharpeMin!=='') qs+='&sharpe_min='+encodeURIComponent(curSharpeMin);
   if(curNameKw) qs+='&name_kw='+encodeURIComponent(curNameKw);
   fetch('/api/rank?'+qs).then(function(r){return r.json();}).then(function(d){
     var items=d.items||[], total=d.total||0, miss=d.miss_count, warmup=d.warmup||null;
@@ -1174,8 +1180,10 @@ function loadRank(page){
       +'<button type="button" onclick="loadRank('+(page+1)+')" '+(page>=pages?'disabled':'')+'>下一页</button>';
   }).catch(function(){ document.getElementById('rank-table').innerHTML='<div class="empty">加载失败</div>'; });
 }
-// —— 策略统计分析（基于 /api/rank 全量翻页拉取后在前端聚合；无新增后端 API）——
-var STATS_PAGE_SIZE = 500;  // 与后端 rank_runs size 上限一致（repository 强制 max(1, min(500, size))）
+// —— 策略统计分析（基于 /api/rank 一次性拉全量后在前端聚合；无新增后端 API）——
+// 改为一次拉全量：rank_runs 后端 size 上限已放开到 100000，单策略 run 数（实测 ~2200）
+// 一次返回即可，避免此前 size=500 翻 5 页、每页全量重算导致统计面板卡在"统计计算中…"。
+var STATS_PAGE_SIZE = 100000;  // 与后端 rank_runs size 上限一致（repository 强制 max(1, min(100000, size))）
 var statsSeq = 0;           // 请求序号：并发/过期请求直接丢弃，避免旧结果覆盖新统计
 
 // 数值有效性：非 null/undefined/NaN 才算有效（计入分母）
@@ -1262,6 +1270,7 @@ function loadStats(){
   var qs = 'strategy=' + encodeURIComponent(curStrategy) + '&size=' + STATS_PAGE_SIZE;
   if(curWinRateMin!=='') qs += '&win_rate_min=' + encodeURIComponent(curWinRateMin);
   if(curProfitFactorMin!=='') qs += '&profit_factor_min=' + encodeURIComponent(curProfitFactorMin);
+  if(curSharpeMin!=='') qs += '&sharpe_min=' + encodeURIComponent(curSharpeMin);
   if(curNameKw) qs += '&name_kw=' + encodeURIComponent(curNameKw);
   var all = [];
   var page = 1;
@@ -1331,19 +1340,22 @@ function exportCsv(){
     +'&order='+encodeURIComponent(curSortRules.map(function(r){return r.dir;}).join(','));
   if(curWinRateMin!=='') qs+='&win_rate_min='+encodeURIComponent(curWinRateMin);
   if(curProfitFactorMin!=='') qs+='&profit_factor_min='+encodeURIComponent(curProfitFactorMin);
+  if(curSharpeMin!=='') qs+='&sharpe_min='+encodeURIComponent(curSharpeMin);
   if(curNameKw) qs+='&name_kw='+encodeURIComponent(curNameKw);
   window.open('/api/rank?'+qs);
 }
 function resetFilters(){
   document.getElementById('win-rate-min').value='';
   document.getElementById('profit-factor-min').value='';
+  document.getElementById('sharpe-min').value='';
   document.getElementById('name-kw').value='';
-  curWinRateMin=''; curProfitFactorMin=''; curNameKw='';
+  curWinRateMin=''; curProfitFactorMin=''; curSharpeMin=''; curNameKw='';
   loadRank(1);
 }
 document.getElementById('strategy').addEventListener('change',function(){ loadRank(1); });
 document.getElementById('win-rate-min').addEventListener('change',function(){ loadRank(1); });
 document.getElementById('profit-factor-min').addEventListener('change',function(){ loadRank(1); });
+document.getElementById('sharpe-min').addEventListener('change',function(){ loadRank(1); });
 document.getElementById('name-kw').addEventListener('change',function(){ loadRank(1); });
 window.addEventListener('DOMContentLoaded', function(){ loadRank(1); });
 </script>
@@ -1476,6 +1488,7 @@ class Handler(BaseHTTPRequestHandler):
         scope = (params.get("scope", [""])[0] or "").strip() or None
         win_rate_min = _opt_float((params.get("win_rate_min", [""])[0] or "").strip())
         profit_factor_min = _opt_float((params.get("profit_factor_min", [""])[0] or "").strip())
+        sharpe_min = _opt_float((params.get("sharpe_min", [""])[0] or "").strip())
         name_kw = (params.get("name_kw", [""])[0] or "").strip() or None
         ph = (params.get("params_hash", [""])[0] or "").strip() or None
         export = (params.get("export", [""])[0] or "").strip()
@@ -1517,7 +1530,7 @@ class Handler(BaseHTTPRequestHandler):
                 strategy_name, ph, scope=scope, symbols=symbols, page=1, size=100000,
                 sort_by=sort_by, order=order,
                 win_rate_min=win_rate_min, profit_factor_min=profit_factor_min,
-                name_kw=name_kw,
+                sharpe_min=sharpe_min, name_kw=name_kw,
             )
             self._send_csv(_ranks_to_csv(data["items"]), f"rank_{strategy_name}.csv")
             return
@@ -1525,7 +1538,7 @@ class Handler(BaseHTTPRequestHandler):
             strategy_name, ph, scope=scope, symbols=symbols, page=page, size=size,
             sort_by=sort_by, order=order,
             win_rate_min=win_rate_min, profit_factor_min=profit_factor_min,
-            name_kw=name_kw,
+            sharpe_min=sharpe_min, name_kw=name_kw,
         )
         if data["total"] == 0:
             latest = storage_repo.latest_batch_for_strategy(strategy_name, ph)
