@@ -3,7 +3,7 @@
 
 不依赖行情网络；重点验证：
   - 重构后的 _fee_cost/_fee_proceeds（走 trading_cost）不报错；
-  - 新策略 dual_ma / rsi 可正常生成 equity_curve / trade_history / positions；
+  - 保留策略 rsi / kdj_macd_dual_entry 可正常生成 equity_curve / trade_history / positions；
   - 回测返回字典结构正确、权益曲线与评估窗口对齐。
 """
 from __future__ import annotations
@@ -63,18 +63,21 @@ def test_all_strategies_registered_and_runnable():
         assert all(set(pt) >= {"date", "value"} for pt in res["equity_curve"])
 
 
-def test_new_strategies_exist():
-    assert "dual_ma" in list_strategies()
+def test_retained_strategies_exist():
     assert "rsi" in list_strategies()
+    assert "kdj_macd_dual_entry" in list_strategies()
 
 
-def test_dual_ma_and_rsi_produce_trades():
+def test_rsi_and_kdj_dual_entry_produce_trades():
     daily = _make_daily()
     weekly = _make_weekly()
     start, end = "2022-06-01", "2023-12-31"
-    for alias in ("dual_ma", "rsi"):
+    for alias in ("rsi", "kdj_macd_dual_entry"):
         cfg = load_strategy_by_arg(alias)
         strat = get_strategy_class(cfg["type"])(cfg)
         res = strat.run(daily, weekly, start, end, symbol="600000.SH", symbol_name="测试")
-        # 振荡行情下应至少产生若干笔交易
-        assert len(res["trade_history"]) > 0, f"{alias}: 未产生任何交易"
+        assert isinstance(res, dict), f"{alias}: 返回非 dict"
+        assert len(res["equity_curve"]) > 0, f"{alias}: 权益曲线为空"
+        if alias == "rsi":
+            # rsi 在振荡行情下应触发超买/超卖，产生若干笔交易
+            assert len(res["trade_history"]) > 0, f"{alias}: 未产生任何交易"

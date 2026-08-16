@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """验证 M2 自动发现：不依赖任何手写 dict，扫描 engine/strategies/*.py 收集 BaseStrategy 子类。
 
-- list_strategies() 仍返回含 turtle / kdj_macd_dual_entry；
-- get_strategy_class("turtle") 能取到类；
+- list_strategies() 仍返回含 rsi / kdj_macd_dual_entry；
+- get_strategy_class("rsi") 能取到类；
 - 手工 dict 已删除（STRATEGY_REGISTRY 由 discover_strategies() 构建）。
 """
 import os
@@ -23,16 +23,16 @@ from strategylab.engine.strategies import (  # noqa: E402
 
 reg = discover_strategies()
 print("discovered types:", sorted(reg))
-assert "turtle" in reg, "自动发现缺失 turtle"
+assert "rsi" in reg, "自动发现缺失 rsi"
 assert "kdj_macd_dual_entry" in reg, "自动发现缺失 kdj_macd_dual_entry"
 
 ls = list_strategies()
 print("list_strategies():", ls)
 assert ls == sorted(reg), "list_strategies 与自动发现结果不一致"
 
-turtle_cls = get_strategy_class("turtle")
-print("get_strategy_class('turtle') ->", turtle_cls.__name__)
-assert turtle_cls.__name__ == "TurtleStrategy", "turtle 类型映射错误"
+rsi_cls = get_strategy_class("rsi")
+print("get_strategy_class('rsi') ->", rsi_cls.__name__)
+assert rsi_cls.__name__ == "RsiStrategy", "rsi 类型映射错误"
 
 kdj_cls = get_strategy_class("kdj_macd_dual_entry")
 print("get_strategy_class('kdj_macd_dual_entry') ->", kdj_cls.__name__)

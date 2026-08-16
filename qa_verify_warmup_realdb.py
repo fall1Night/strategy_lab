@@ -33,13 +33,13 @@ def check(label, cond, detail=""):
 
 print("================ A. 真实 DB 验证 latest_batch_for_strategy ================")
 
-# 1) 取得海龟策略配置与 params_hash
-cfg = config.load_strategy_by_arg("turtle")
+# 1) 取得 RSI 策略配置与 params_hash
+cfg = config.load_strategy_by_arg("rsi")
 strategy_name = cfg.get("name", "")
 ph = repo.compute_params_hash(cfg)
 print("strategy_name =", repr(strategy_name))
 print("params_hash   =", ph)
-check("turtle name 与需求一致", strategy_name == "海龟交易法则(唐奇安突破+ATR止损)", repr(strategy_name))
+check("rsi name 与需求一致", strategy_name == "RSI超买超卖", repr(strategy_name))
 check("params_hash 非空", bool(ph), ph)
 
 # 2) 真实批次查询（name + ph）：预期 done/total=1301，status=done

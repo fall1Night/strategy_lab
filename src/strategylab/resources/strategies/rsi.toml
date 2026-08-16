@@ -12,13 +12,14 @@
 name = "RSI超买超卖"
 type = "rsi"
 market = "china_a"
-description = "RSI(14)上穿30买入, 下穿70清仓; 单笔底仓, T+1/整手/前复权。"
+description = "RSI(12)上穿30买入, 下穿70清仓; 成本价回撤>5%硬止损清仓; 单笔底仓, T+1/整手/前复权。"
 
 [params]
 initial_cash = 200000          # 初始资金(元)
-rsi_period = 14               # RSI 计算周期
+rsi_period = 12               # RSI 计算周期(判断用)
 oversold = 30                 # 超卖阈值(上穿买入)
 overbought = 70               # 超买阈值(下穿清仓)
+stop_loss_pct = 0.05          # 硬止损: 持仓期间盘中最低价≤成本价×(1-该值)则当日收盘清仓
 buy_ratio = 0.5               # 买入占可用资金比例
 commission = 0.0003           # 佣金(双边, 比例)
 stamp_tax = 0.0005            # 印花税(仅卖方, 比例)

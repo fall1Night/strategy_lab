@@ -27,16 +27,19 @@ class RSIStrategy(BaseStrategy):
     @staticmethod
     def describe(params: dict) -> str:
         p = params or {}
-        period = int(p.get("rsi_period", 14))
+        period = int(p.get("rsi_period", 12))
         oversold = float(p.get("oversold", 30))
         overbought = float(p.get("overbought", 70))
         buy_ratio = float(p.get("buy_ratio", 0.5)) * 100
+        stop_loss_pct = float(p.get("stop_loss_pct", 0.05)) * 100
         comm = (p.get("commission") or 0) * 10000
         tax = (p.get("stamp_tax") or 0) * 10000
         lot_size = p.get("lot_size", 100)
         return (
             f"- 信号：RSI({period}) 上穿 {oversold:.0f}(超卖) 且无持仓 → 买入 {buy_ratio:.0f}% 可用资金（整手）；"
             f"RSI({period}) 下穿 {overbought:.0f}(超买) 且有持仓 → 清仓。\n"
+            f"- 硬止损：持仓期间若盘中最低价 ≤ 成本价×(1-{stop_loss_pct:.0f}%)，当日收盘止损清仓"
+            f"（优先于超买信号，控制单笔最大回撤）。\n"
             f"- 单笔底仓，同一时间仅持一笔；清仓后下一上穿可再买入。\n"
             f"- RSI 采用中国式 SMA 平滑（与 MyTT / 通达信口径一致）。\n"
             f"- 执行价：当日信号+当日收盘（含 look-ahead 偏差）；A股 T+1 / {lot_size}股整手 / "
@@ -51,10 +54,11 @@ class RSIStrategy(BaseStrategy):
         p = self.params
         self.symbol = symbol
         self.symbol_name = symbol_name
-        period = int(p.get("rsi_period", 14))
+        period = int(p.get("rsi_period", 12))
         oversold = float(p.get("oversold", 30))
         overbought = float(p.get("overbought", 70))
         buy_ratio = float(p.get("buy_ratio", 0.5))
+        stop_loss_pct = float(p.get("stop_loss_pct", 0.05))
         initial_cash = float(p.get("initial_cash", 200000))
         lot_size = int(p.get("lot_size", 100))
 
@@ -89,9 +93,19 @@ class RSIStrategy(BaseStrategy):
             is_up = bool(cross_up.iloc[i]) if pd.notna(cross_up.iloc[i]) else False
             is_down = bool(cross_down.iloc[i]) if pd.notna(cross_down.iloc[i]) else False
 
-            # 1. 持仓中：下穿超买 → 清仓
+            # 1. 持仓中：先判硬止损（回撤>阈值优先），再判超买清仓
             if base_shares > 0 and base_trade is not None:
-                if is_down:
+                entry_price = base_trade["entry_price"]
+                low = float(row["low"])
+                stop_price = entry_price * (1 - stop_loss_pct)
+                if low <= stop_price:
+                    # 成本价回撤超过 stop_loss_pct，当日收盘止损清仓
+                    cash += self._close_base(
+                        base_trade, close, date_str, i, trade_history, label="止损清仓"
+                    )
+                    base_shares = 0
+                    base_trade = None
+                elif is_down:
                     cash += self._close_base(
                         base_trade, close, date_str, i, trade_history, label="超买清仓"
                     )

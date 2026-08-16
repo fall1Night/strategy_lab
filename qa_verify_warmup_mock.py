@@ -45,7 +45,7 @@ def insert_batch(name, ph, status, done, total):
         s.add(Batch(
             batch_id=f"test-{name}-{status}-{done}",
             strategy_name=name,
-            strategy_type="turtle",
+            strategy_type="rsi",
             params_hash=ph,
             scope_type="sector",
             scope_value="ALL",
