@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""周线 MACD + 日线 KDJ 双入口建仓 + 日线 J 线做 T + 日线 MACD 水上死叉清仓。
+"""周线 MACD + 日线 KDJ 双入口建仓 + 日线 J 线做 T + 日线 RSI(12) 下穿 70 清仓。
 
 策略逻辑（参数全部来自 .toml，可按需改）：
   建仓（单入口路径A，同一时间仅持有一笔底仓）：
@@ -9,7 +9,7 @@
     - 加仓：J 较近 5 日高点回落 ≥ drop_from_high 且仍在下降（J<前日J）→ 买 t_buy_amount。
     - 停止加仓：J 反弹（J≥前日J）→ 不买。
     - 卖出加仓：J > j_sell_threshold → 卖光全部加仓部分，底仓不动。
-  清仓：日线 MACD 水上死叉（DIF>0, DEA>0, 且 DIF 下穿 DEA）→ 当日收盘清仓全部。
+  清仓：日线 RSI(period) 下穿 overbought（默认 70）→ 当日收盘清仓全部。
   执行价：当日信号 + 当日收盘（含 look-ahead 偏差，由配置显式声明）。
 """
 from __future__ import annotations
@@ -19,6 +19,7 @@ import pandas as pd
 
 from .base import BaseStrategy
 from ..indicators import compute_kdj, compute_macd
+from ..vendor.myt import RSI
 
 
 class KdjMacdDualEntry(BaseStrategy):
@@ -31,6 +32,8 @@ class KdjMacdDualEntry(BaseStrategy):
         entry = params.get("entry") or {}
         pa = entry.get("path_a") or {}
         tt = params.get("t_trade") or {}
+        params_rsi = params.get("rsi") or {}
+        peak_dd_pct = float((params.get("trailing_stop") or {}).get("peak_drawdown_pct", 0.05)) * 100
         comm = (params.get("commission") or 0) * 10000
         tax = (params.get("stamp_tax") or 0) * 10000
         lot_size = params.get("lot_size") or 100
@@ -42,7 +45,8 @@ class KdjMacdDualEntry(BaseStrategy):
             f"日线KDJ的J线<{pa.get('j_buy', 50)}当日收盘买入底仓；hist回到0轴上方自动解除监控。\n"
             f"- 做T（仅看日线J线）：J较近5日高点回落≥{tt.get('drop_from_high', 30)}且仍在下降（J<前日J）当日收盘买{t_amt_wan}万；"
             f"J反弹（J≥前日J）停止加仓；J>{tt.get('j_sell_threshold', 80)}当日收盘卖光全部加仓部分，底仓不动。\n"
-            f"- 清仓：日线MACD水上死叉（DIF>0且DEA>0且DIF下穿DEA）当日收盘清仓全部。\n"
+            f"- 清仓：满足任一即清 —— (a) 日线 RSI({params_rsi.get('period', 12)}) 下穿 {params_rsi.get('overbought', 70):.0f}(超买)；"
+            f"(b) 持仓期间净值从收益峰值回落 ≥ {peak_dd_pct:.0f}%（移动止盈/回撤止损）。均当日收盘清仓全部。\n"
             f"- 执行价：当日信号+当日收盘（含 look-ahead 偏差）；A股 T+1 / {lot_size}股整手 / "
             f"佣金{comm:.0f}bp双边 / 印花税{tax:.0f}bp卖方 / 前复权qfq。\n"
             f"- 周线信号对齐采用 backward merge（最新 weekly_date ≤ daily_date），周内不使用未来数据。"
@@ -106,19 +110,22 @@ class KdjMacdDualEntry(BaseStrategy):
         entry = p["entry"]
         pa = entry["path_a"]
         tt = p["t_trade"]
-        exit_cfg = p["exit"]
+        rsi_p = p.get("rsi") or {}
+        rsi_period = int(rsi_p.get("period", 12))
+        rsi_overbought = float(rsi_p.get("overbought", 70))
+        trailing_p = p.get("trailing_stop") or {}
+        peak_dd = float(trailing_p.get("peak_drawdown_pct", 0.05))
         single_base = bool(p.get("single_base_position", {}).get("enabled", True))
 
         # ---- 日线指标 ----
-        d_dif, d_dea, d_hist = compute_macd(daily["close"], macd_p["fast"], macd_p["slow"], macd_p["signal"])
-        daily["dif"], daily["dea"], daily["hist"] = d_dif, d_dea, d_hist
         j = compute_kdj(daily, kdj_p["n"], kdj_p["m1"], kdj_p["m2"])
         daily["J"] = j
         daily["J_prev"] = j.shift(1)
         daily["J_5d_high"] = j.rolling(5).max()
-        daily["above_water"] = (daily["dif"] > 0) & (daily["dea"] > 0)
-        daily["death_cross"] = (daily["dif"].shift(1) >= daily["dea"].shift(1)) & (daily["dif"] < daily["dea"])
-        daily["clear_signal"] = daily["above_water"] & daily["death_cross"]
+        # 清仓信号：日线 RSI(period) 下穿 overbought（默认 70）
+        rsi_arr = pd.Series(RSI(daily["close"].values, rsi_period))
+        rsi_prev = rsi_arr.shift(1)
+        daily["rsi_cross_down"] = (rsi_prev > rsi_overbought) & (rsi_arr <= rsi_overbought)
 
         # ---- 周线指标 ----
         w_dif, w_dea, w_hist = compute_macd(weekly["close"], macd_p["fast"], macd_p["slow"], macd_p["signal"])
@@ -147,7 +154,7 @@ class KdjMacdDualEntry(BaseStrategy):
         last_trigger_week_date = None
         trade_history: list = []
         equity_curve: list = []
-        peak_total_value: float = 0.0  # 持仓期间总资产峰值（用于 6% 回撤清仓）
+        peak_total_value: float = 0.0  # 持仓期间净值峰值（用于收益峰值回撤清仓）
 
         eval_start_ts = pd.Timestamp(start)
         eval_end_ts = pd.Timestamp(end)
@@ -165,31 +172,30 @@ class KdjMacdDualEntry(BaseStrategy):
             J = float(row["J"])
             J_prev = row["J_prev"]
             J_5d_high = row["J_5d_high"]
-            clear_sig = bool(row["clear_signal"]) if pd.notna(row["clear_signal"]) else False
+            rsi_cross_down = bool(row["rsi_cross_down"]) if pd.notna(row["rsi_cross_down"]) else False
             wk_trig = bool(row["wk_trigger"]) if pd.notna(row["wk_trigger"]) else False
             wk_date = row["wk_date"]
 
             holding = (base_shares > 0) or (t_shares > 0)
 
-            # 峰值回落检测（持仓期间总资产从最高点回落 >= 6% → 清仓）
+            # 持仓期间净值峰值 & 回撤检测（收益峰值回撤清仓用）
             current_value = cash + (base_shares + t_shares) * close
-            if current_value > peak_total_value:
+            if holding and current_value > peak_total_value:
                 peak_total_value = current_value
-            peak_drop = peak_total_value > 0 and (peak_total_value - current_value) >= peak_total_value * 0.06
+            peak_drop = holding and peak_total_value > 0 and (
+                peak_total_value - current_value
+            ) >= peak_total_value * peak_dd
 
-            # 1. 清仓（最高优先级）：MACD 水上死叉 或 峰值回落 6%，满足其一即清
-            exit_cond = (
-                (clear_sig and exit_cfg.get("daily_macd_water_death_cross", True))
-                or peak_drop
-            )
-            if holding and exit_cond:
+            # 1. 清仓（最高优先级）：RSI 下穿 70 或 收益峰值回撤 ≥ peak_dd%，满足任一即清
+            if holding and (rsi_cross_down or peak_drop):
                 exit_price = close
+                trigger = "峰值回撤清仓" if peak_drop else "RSI下穿清仓"
                 if t_shares > 0 and t_lots:
-                    cash += self._close_t(t_lots, exit_price, date_str, i, trade_history, label="T加仓(清仓)")
+                    cash += self._close_t(t_lots, exit_price, date_str, i, trade_history, label=f"T加仓({trigger})")
                     t_shares = 0
                     t_lots = []
                 if base_shares > 0 and base_trade is not None:
-                    cash += self._close_base(base_trade, exit_price, date_str, i, trade_history, label="底仓(清仓)")
+                    cash += self._close_base(base_trade, exit_price, date_str, i, trade_history, label=f"底仓({trigger})")
                     base_shares = 0
                     base_trade = None
                 monitoring_armed = False
@@ -239,7 +245,7 @@ class KdjMacdDualEntry(BaseStrategy):
                         pid_counter += 1
                         base_trade = {"entry_date": date_str, "entry_price": close, "size": size,
                                       "entry_bar": i, "position_id": pid_counter}
-                        peak_total_value = cash + size * close  # 建仓时设初始峰值
+                        peak_total_value = cash + size * close  # 建仓时设初始净值峰值
                         monitoring_armed = False
                         bought_a = True
         equity_curve.append({"date": date_str, "value": round(cash + (base_shares + t_shares) * close, 2)})

@@ -686,8 +686,8 @@ __NAV_HTML__
   <p class="sub">选策略 + 选范围（板块 / 自定义池 / 全市场），一键批量扫描。回测区间固定 <code>2020-01-01 ~ 今天</code>。</p>
 
   <div class="card">
-    <label for="strategy">策略</label>
-    <select id="strategy">
+    <label for="strategy">策略（可多选，Ctrl/Cmd 点击加选；至少选 1 个）</label>
+    <select id="strategy" multiple size="6">
 __STRAT_OPTS__
     </select>
 
@@ -727,6 +727,7 @@ __SECTOR_OPTS__
         <span>总数：<b id="prog-total">0</b></span>
         <span>当前标的：<b id="prog-current">—</b></span>
         <span>状态：<b id="prog-status">—</b></span>
+        <span>已运行：<b id="prog-elapsed">—</b></span>
         <span>预计剩余：<b id="prog-eta">—</b></span>
       </div>
     </div>
@@ -751,7 +752,7 @@ __SECTOR_OPTS__
   </details>
 </div>
 <script>
-var curBatchId=null, pollTimer=null, curBatchType='backtest';
+var curBatches=[], pollTimer=null, curBatchType='backtest', batchStartTs=0;
 function fmtEta(s){ if(s==null) return '—'; s=Math.round(s); var m=Math.floor(s/60); var sec=s%60; return (m>0?m+'分':'')+sec+'秒'; }
 function switchScope(){
   var scope=document.querySelector('input[name=scope]:checked').value;
@@ -762,7 +763,6 @@ Array.prototype.forEach.call(document.querySelectorAll('input[name=scope]'),func
 
 function buildScopeForm(){
   var fd=new FormData();
-  fd.append('strategy', document.getElementById('strategy').value);
   var scope=document.querySelector('input[name=scope]:checked').value;
   if(scope==='sector'){
     var sel=document.getElementById('sector-multi');
@@ -785,83 +785,145 @@ function updateData(){
     beginBatch(d);
   }).catch(function(e){ alert('更新失败: '+e); });
 }
-function runBacktest(){
-  var fd=buildScopeForm(); if(!fd) return;
-  startBatch(fd);
+function selectedStrategies(){
+  var sel=document.getElementById('strategy');
+  if(!sel) return [];
+  return Array.prototype.map.call(sel.selectedOptions,function(o){return o.value;});
 }
-function startBatch(fd){
-  fetch('/api/batch',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
-    if(d.error){ alert(d.error); return; }
-    beginBatch(d);
-  }).catch(function(e){ alert('提交失败: '+e); });
+function runBacktest(){
+  var strats=selectedStrategies();
+  if(!strats.length){ alert('请至少选择一个策略'); return; }
+  var base=buildScopeForm(); if(!base) return;
+  // 多策略并发：每个策略各提交一个独立批次，并行发起
+  Promise.allSettled(strats.map(function(s){
+    var fd=new FormData();
+    base.forEach(function(v,k){ fd.append(k,v); });
+    fd.append('strategy', s);
+    return fetch('/api/batch',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
+      if(d.error){ return {ok:false, strategy:s, error:d.error}; }
+      d.strategy_name = d.strategy_name || s;
+      return {ok:true, d:d};
+    }).catch(function(e){ return {ok:false, strategy:s, error:String(e)}; });
+  })).then(function(results){
+    // Promise.allSettled 的元素是 {status, value, reason}，
+    // 真实结果对象（{ok,d,strategy,error}）在 r.value 里，不能直接读 r.ok/r.d
+    var settled=results.map(function(r){
+      if(r.status==='fulfilled'){ return r.value; }
+      return {ok:false, strategy:'(请求异常)', error:String(r.reason)};
+    });
+    var ok=settled.filter(function(r){return r.ok;}).map(function(r){return r.d;});
+    var failed=settled.filter(function(r){return !r.ok;});
+    if(!ok.length){ alert('全部提交失败：'+failed.map(function(f){return f.strategy+' '+f.error;}).join('；')); return; }
+    beginMulti(ok, 'backtest');
+    if(failed.length){ alert('以下策略提交失败（其余已开始）：'+failed.map(function(f){return f.strategy+'('+f.error+')';}).join('；')); }
+  });
 }
 function beginBatch(d){
-  curBatchId=d.batch_id;
-  curBatchType=d.batch_type||'backtest';
+  beginMulti([d], d.batch_type||'backtest');
+}
+function beginMulti(list, btype){
+  curBatches = list.map(function(b){
+    return {batch_id:b.batch_id, strategy_name:b.strategy_name||'', total_count:b.total_count||0,
+            hit_count:b.hit_count||0, done:0, failed:0, skipped:0, total:b.total_count||0,
+            current_symbol:'—', status:'running', eta_seconds:null};
+  });
+  curBatchType=btype;
+  batchStartTs=Date.now();
   document.getElementById('batch-info').style.display='block';
-  document.getElementById('batch-id').textContent=d.batch_id;
-  document.getElementById('batch-total').textContent=d.total_count;
-  document.getElementById('batch-hit').textContent=d.hit_count;
+  renderBatchHead();
+  renderBatchAgg();
   document.getElementById('prog-done-msg').style.display='none';
   document.getElementById('reinit-note').style.display='none';
-  // B. 新批次启动：恢复「取消批次」按钮可见且可用（修复：上一轮终态隐藏后再次提交不再隐藏）
+  // B. 新批次启动：恢复「取消所有批次」按钮可见且可用
   var cbtn=document.getElementById('cancel-btn');
-  if(cbtn){ cbtn.style.display=''; cbtn.disabled=false; cbtn.textContent='取消批次'; }
-  poll(); pollTimer=setInterval(poll,2000);
+  if(cbtn){ cbtn.style.display=''; cbtn.disabled=false; cbtn.textContent='取消所有批次'; }
+  pollMulti(); pollTimer=setInterval(pollMulti,2000);
 }
-function poll(){
-  if(!curBatchId) return;
-  fetch('/api/batch/'+curBatchId+'/progress').then(function(r){return r.json();}).then(function(p){
-    var done=p.done, failed=p.failed, skipped=p.skipped, total=p.total;
-    var finished=done+failed+skipped;
-    var pct = total>0 ? Math.round(finished/total*100) : 0;
-    document.getElementById('prog-bar').style.width=pct+'%';
-    document.getElementById('prog-pct').textContent=pct+'%';
-    document.getElementById('prog-done').textContent=done;
-    document.getElementById('prog-failed').textContent=failed;
-    document.getElementById('prog-skipped').textContent=skipped;
-    document.getElementById('prog-total').textContent=total;
-    document.getElementById('prog-current').textContent=p.current_symbol||'—';
-    document.getElementById('prog-status').textContent=p.status;
-    document.getElementById('prog-eta').textContent=fmtEta(p.eta_seconds);
-    if(['done','cancelled','interrupted'].indexOf(p.status)>=0){
-      clearInterval(pollTimer); pollTimer=null;
-      var dm=document.getElementById('prog-done-msg');
-      if(curBatchType==='data'){
-        dm.innerHTML='✅ 行情已更新，可前往 <a href="/analysis">分析查询页</a> 或重新『回测』。';
-      } else {
-        dm.innerHTML='✅ 批次已完成。前往 <a href="/analysis">分析查询页</a> 查看收益排名。';
-      }
-      dm.style.display='block';
-      // A. 终态隐藏「取消批次」按钮（核心修复：之前按钮一直显示，用户无法判断是否完成）
-      var cbtn=document.getElementById('cancel-btn');
-      if(cbtn){ cbtn.style.display='none'; }
-      // C. 完成态视觉强化：进度条置为绿色，明确传达「已完成」
-      var bar=document.getElementById('prog-bar');
-      if(bar){ bar.style.background='#2e7d32'; }
-      if(p.status==='interrupted'){ document.getElementById('reinit-note').style.display='block'; }
-      loadBatches();
-    }
-  }).catch(function(){});
+function renderBatchHead(){
+  if(!curBatches.length) return;
+  var ids=curBatches.map(function(b){return (b.batch_id||'').slice(0,8);});
+  document.getElementById('batch-id').textContent = curBatches.length>1 ? (curBatches.length+' 个批次: '+ids.join(', ')) : (curBatches[0].batch_id||'');
+  var tot=0, hit=0;
+  curBatches.forEach(function(b){ tot+=b.total_count||0; hit+=b.hit_count||0; });
+  document.getElementById('batch-total').textContent=tot;
+  document.getElementById('batch-hit').textContent=hit;
+}
+function pollMulti(){
+  if(!curBatches.length) return;
+  var pending=curBatches.map(function(b){
+    return fetch('/api/batch/'+b.batch_id+'/progress').then(function(r){return r.json();}).then(function(p){
+      b.done=p.done; b.failed=p.failed; b.skipped=p.skipped; b.total=p.total;
+      b.current_symbol=p.current_symbol||'—'; b.status=p.status; b.eta_seconds=p.eta_seconds;
+    }).catch(function(){});
+  });
+  Promise.all(pending).then(function(){
+    renderBatchAgg();
+    var allDone=curBatches.every(function(b){ return ['done','cancelled','interrupted'].indexOf(b.status)>=0; });
+    if(allDone){ clearInterval(pollTimer); pollTimer=null; finishMulti(); }
+  });
+}
+function renderBatchAgg(){
+  var done=0,failed=0,skipped=0,total=0;
+  curBatches.forEach(function(b){ done+=b.done||0; failed+=b.failed||0; skipped+=b.skipped||0; total+=b.total||0; });
+  var finished=done+failed+skipped;
+  var pct = total>0 ? Math.round(finished/total*100) : 0;
+  document.getElementById('prog-bar').style.width=pct+'%';
+  document.getElementById('prog-pct').textContent=pct+'%';
+  document.getElementById('prog-done').textContent=done;
+  document.getElementById('prog-failed').textContent=failed;
+  document.getElementById('prog-skipped').textContent=skipped;
+  document.getElementById('prog-total').textContent=total;
+  var running=curBatches.filter(function(b){ return ['done','cancelled','interrupted'].indexOf(b.status)<0; });
+  if(running.length){
+    document.getElementById('prog-current').textContent = running.map(function(b){ return (b.strategy_name||(b.batch_id||'').slice(0,6))+': '+(b.current_symbol||'—'); }).join('；');
+  } else { document.getElementById('prog-current').textContent='—'; }
+  var doneCnt=curBatches.filter(function(b){ return b.status==='done'; }).length;
+  document.getElementById('prog-status').textContent = doneCnt+'/'+curBatches.length+' 完成';
+  // 已运行时长：时间维度的持续反馈，多策略大范围时进度条增长慢也不会显得「没进度」
+  document.getElementById('prog-elapsed').textContent = batchStartTs ? fmtEta((Date.now()-batchStartTs)/1000) : '—';
+  // ETA：有 running 批次但都还没完成首只（done_count==0）时后端不返回 eta，显示「计算中…」而非「—」
+  var etas=running.map(function(b){ return b.eta_seconds; }).filter(function(x){ return x!=null; });
+  if(!running.length){ document.getElementById('prog-eta').textContent='—'; }
+  else if(etas.length){ document.getElementById('prog-eta').textContent=fmtEta(Math.max.apply(null,etas)); }
+  else { document.getElementById('prog-eta').textContent='计算中…'; }
+}
+function finishMulti(){
+  var dm=document.getElementById('prog-done-msg');
+  if(curBatchType==='data'){
+    dm.innerHTML='✅ 行情已更新，可前往 <a href="/analysis">分析查询页</a> 或重新『回测』。';
+  } else {
+    dm.innerHTML='✅ 全部批次已完成（'+curBatches.length+' 个策略）。前往 <a href="/analysis">分析查询页</a> 查看收益排名。';
+  }
+  dm.style.display='block';
+  // A. 终态隐藏「取消所有批次」按钮
+  var cbtn=document.getElementById('cancel-btn');
+  if(cbtn){ cbtn.style.display='none'; }
+  // C. 完成态视觉强化：进度条置为绿色
+  var bar=document.getElementById('prog-bar');
+  if(bar){ bar.style.background='#2e7d32'; }
+  if(curBatches.some(function(b){ return b.status==='interrupted'; })){ document.getElementById('reinit-note').style.display='block'; }
+  loadBatches();
 }
 var _cancelling=false;
 function cancelBatch(){
-  if(!curBatchId || _cancelling) return;
+  if(!curBatches.length || _cancelling) return;
   _cancelling=true;
   var btn=document.getElementById('cancel-btn');
   if(btn){ btn.disabled=true; btn.textContent='取消中...'; }
   clearInterval(pollTimer); pollTimer=null;
-  fetch('/api/batch/'+curBatchId+'/cancel',{method:'POST'}).then(function(){
+  var pending=curBatches.map(function(b){
+    return fetch('/api/batch/'+b.batch_id+'/cancel',{method:'POST'}).then(function(){}).catch(function(){});
+  });
+  Promise.all(pending).then(function(){
     var st=document.getElementById('prog-status'); if(st){ st.textContent='cancelling'; }
     var dm=document.getElementById('prog-done-msg');
     if(dm){ dm.innerHTML='✅ 取消请求已发送，正在停止中...'; dm.style.display='block'; }
-  }).catch(function(){
-    _cancelling=false;
-    if(btn){ btn.disabled=false; btn.textContent='取消批次'; }
   });
 }
 function loadSectorStatus(){
-  var strat=document.getElementById('strategy').value;
+  var strats=selectedStrategies();
+  var strat = strats.length ? strats[0] : '';
+  if(!strat){ document.getElementById('sector-overview').innerHTML='<span class="empty">请先选择策略</span>'; return; }
   fetch('/api/sector-status?strategy='+encodeURIComponent(strat)).then(function(r){return r.json();}).then(function(d){
     var box=document.getElementById('sector-overview');
     var secs=d.sectors||[];
@@ -885,7 +947,11 @@ function loadBatches(){
   }).catch(function(){ document.getElementById('batch-history').innerHTML='<span class="empty">加载失败</span>'; });
 }
 document.getElementById('strategy').addEventListener('change', loadSectorStatus);
-window.addEventListener('DOMContentLoaded', function(){ switchScope(); loadSectorStatus(); loadBatches(); });
+window.addEventListener('DOMContentLoaded', function(){
+  var sel=document.getElementById('strategy');
+  if(sel && sel.options.length && !sel.selectedOptions.length){ sel.options[0].selected=true; }
+  switchScope(); loadSectorStatus(); loadBatches();
+});
 </script>
 </body>
 </html>"""
@@ -982,6 +1048,8 @@ def build_analysis_html() -> str:
   .stat-item .bar { height:8px; background:#0f172a; border-radius:6px; overflow:hidden; }
   .stat-item .fill { height:100%; background:linear-gradient(90deg,#1f6feb,#3b82f6); border-radius:6px; transition:width .3s; }
   .stat-item .hint { font-size:11px; color:#64748b; margin-top:3px; }
+  .stat-mean { font-size:13px; color:#cbd5e1; margin:0 0 10px; padding:6px 10px; background:#0f172a; border:1px solid #334155; border-radius:6px; }
+  .stat-mean b { color:#22c55e; font-size:15px; }
 __NAV_CSS__</style>
 </head>
 <body>
@@ -1009,8 +1077,20 @@ __STRAT_OPTS__
         <input id="sharpe-min" type="number" step="0.1" placeholder="如 2">
       </div>
       <div class="f-item">
+        <label for="avg-holding-days-max">平均持股天数上限</label>
+        <input id="avg-holding-days-max" type="number" min="0" step="1" placeholder="如 20">
+      </div>
+      <div class="f-item">
         <label for="name-kw">股票名称</label>
         <input id="name-kw" type="text" placeholder="模糊匹配，如 科技">
+      </div>
+      <div class="f-item">
+        <label for="last-open-from">最近建仓日期起</label>
+        <input id="last-open-from" type="date">
+      </div>
+      <div class="f-item">
+        <label for="last-open-to">最近建仓日期止</label>
+        <input id="last-open-to" type="date">
       </div>
     </div>
     <button type="button" onclick="loadRank(1)">查询排名</button>
@@ -1048,10 +1128,11 @@ __STRAT_OPTS__
   </div>
 </div>
 <script>
-var curStrategy='', curWinRateMin='', curProfitFactorMin='', curSharpeMin='', curNameKw='';
+var curStrategy='', curWinRateMin='', curProfitFactorMin='', curSharpeMin='', curNameKw='', curAvgHoldingDaysMax='';
+var curLastOpenFrom='', curLastOpenTo='';
 // —— 组合排序（多键排序）核心状态：curSortRules 为 [{key,dir}, ...]，最多 3 条 ——
-var SORT_FIELDS=[['symbol_name','股票名称'],['total_return_pct','总收益率'],['max_drawdown_pct','最大回撤'],['sharpe','夏普'],['win_rate_pct','胜率'],['profit_factor','盈亏比'],['last_open_date','最近建仓'],['last_t_buy_date','最近做T']];
-var SORT_WHITELIST={'symbol_name':1,'total_return_pct':1,'max_drawdown_pct':1,'sharpe':1,'win_rate_pct':1,'profit_factor':1,'last_open_date':1,'last_t_buy_date':1};
+var SORT_FIELDS=[['symbol_name','股票名称'],['total_return_pct','总收益率'],['max_drawdown_pct','最大回撤'],['sharpe','夏普'],['win_rate_pct','胜率'],['profit_factor','盈亏比'],['avg_holding_days','平均持股天数'],['last_open_date','最近建仓'],['last_t_buy_date','最近做T']];
+var SORT_WHITELIST={'symbol_name':1,'total_return_pct':1,'max_drawdown_pct':1,'sharpe':1,'win_rate_pct':1,'profit_factor':1,'avg_holding_days':1,'last_open_date':1,'last_t_buy_date':1};
 var DEFAULT_SORT_RULES=[{key:'total_return_pct', dir:'desc'}];
 var SORT_STORAGE_KEY='strategylab.rankSort.v1';
 
@@ -1143,7 +1224,13 @@ function loadRank(page){
   curWinRateMin=document.getElementById('win-rate-min').value.trim();
   curProfitFactorMin=document.getElementById('profit-factor-min').value.trim();
   curSharpeMin=document.getElementById('sharpe-min').value.trim();
+  curAvgHoldingDaysMax=document.getElementById('avg-holding-days-max').value.trim();
   curNameKw=document.getElementById('name-kw').value.trim();
+  curLastOpenFrom=document.getElementById('last-open-from').value.trim();
+  curLastOpenTo=document.getElementById('last-open-to').value.trim();
+  if(curLastOpenFrom && curLastOpenTo && curLastOpenFrom>curLastOpenTo){
+    var _t=curLastOpenFrom; curLastOpenFrom=curLastOpenTo; curLastOpenTo=_t;
+  }
   var qs='strategy='+encodeURIComponent(curStrategy)
     +'&page='+page+'&size=50'
     +'&sort_by='+encodeURIComponent(curSortRules.map(function(r){return r.key;}).join(','))
@@ -1151,7 +1238,10 @@ function loadRank(page){
   if(curWinRateMin!=='') qs+='&win_rate_min='+encodeURIComponent(curWinRateMin);
   if(curProfitFactorMin!=='') qs+='&profit_factor_min='+encodeURIComponent(curProfitFactorMin);
   if(curSharpeMin!=='') qs+='&sharpe_min='+encodeURIComponent(curSharpeMin);
+  if(curAvgHoldingDaysMax!=='') qs+='&avg_holding_days_max='+encodeURIComponent(curAvgHoldingDaysMax);
   if(curNameKw) qs+='&name_kw='+encodeURIComponent(curNameKw);
+  if(curLastOpenFrom!=='') qs+='&last_open_date_min='+encodeURIComponent(curLastOpenFrom);
+  if(curLastOpenTo!=='') qs+='&last_open_date_max='+encodeURIComponent(curLastOpenTo);
   fetch('/api/rank?'+qs).then(function(r){return r.json();}).then(function(d){
     var items=d.items||[], total=d.total||0, miss=d.miss_count, warmup=d.warmup||null;
     var stratSel=document.getElementById('strategy');
@@ -1177,8 +1267,19 @@ function loadRank(page){
     var pages=Math.max(1, Math.ceil(total/50));
     pager.innerHTML='<button type="button" onclick="loadRank('+(page-1)+')" '+(page<=1?'disabled':'')+'>上一页</button>'
       +' <span>第 '+page+' / '+pages+' 页</span> '
-      +'<button type="button" onclick="loadRank('+(page+1)+')" '+(page>=pages?'disabled':'')+'>下一页</button>';
+      +'<button type="button" onclick="loadRank('+(page+1)+')" '+(page>=pages?'disabled':'')+'>下一页</button>'
+      +' <span class="page-jump">跳至 <input id="page-jump" type="number" min="1" max="'+pages+'" value="'+page+'" style="width:60px;padding:4px 6px;"> 页'
+      +'<button type="button" onclick="goPage('+pages+')">跳转</button></span>';
   }).catch(function(){ document.getElementById('rank-table').innerHTML='<div class="empty">加载失败</div>'; });
+}
+// 输入页码跳转（带边界校验：<1 归 1，>总页数归总页数）
+function goPage(maxPages){
+  var el=document.getElementById('page-jump');
+  if(!el) return;
+  var p=parseInt(el.value,10);
+  if(isNaN(p)||p<1) p=1;
+  if(maxPages && p>maxPages) p=maxPages;
+  loadRank(p);
 }
 // —— 策略统计分析（基于 /api/rank 一次性拉全量后在前端聚合；无新增后端 API）——
 // 改为一次拉全量：rank_runs 后端 size 上限已放开到 100000，单策略 run 数（实测 ~2200）
@@ -1205,10 +1306,16 @@ function statItemHtml(label, num, den){
     + '<div class="hint">' + hint + '</div>'
     + '</div>';
 }
+// 平均持股天数均值行：分母>0 才出均值，否则显示占位
+function statMeanHtml(hold){
+  if(hold.den <= 0) return '<div class="stat-mean">均值：<b>-</b>（无有效数据）</div>';
+  var mean = hold.sum / hold.den;
+  return '<div class="stat-mean">均值：<b>' + mean.toFixed(1) + '</b> 天（基于 ' + hold.den + ' 个有效）</div>';
+}
 
-// 纯聚合计算（与 DOM 无关，便于独立验证）：胜率>50% / |回撤|≤10·15·20 / 夏普>1 / 盈亏比>2
+// 纯聚合计算（与 DOM 无关，便于独立验证）：胜率>50% / |回撤|≤3·6·9 / 夏普>1 / 盈亏比>2
 function computeStrategyStats(items){
-  var st = { winRate:{num:0, den:0}, drawdown:{num10:0, num15:0, num20:0, den:0}, sharpe:{num:0, den:0}, pf:{num:0, den:0} };
+  var st = { winRate:{num:0, den:0}, drawdown:{num3:0, num6:0, num9:0, den:0}, sharpe:{num:0, den:0}, pf:{num:0, den:0}, hold:{sum:0, den:0, lt20:0, b20_40:0, b40_60:0, ge60:0} };
   for(var i=0;i<items.length;i++){
     var it = items[i] || {};
     var wr = it.win_rate_pct;
@@ -1217,14 +1324,25 @@ function computeStrategyStats(items){
     if(isNumVal(dd)){
       st.drawdown.den++;
       var a = Math.abs(Number(dd));  // DB 中 max_drawdown_pct 为正数（回撤幅度），abs 同时兼容两种符号
-      if(a <= 10) st.drawdown.num10++;
-      if(a <= 15) st.drawdown.num15++;
-      if(a <= 20) st.drawdown.num20++;
+      if(a <= 3) st.drawdown.num3++;
+      if(a <= 6) st.drawdown.num6++;
+      if(a <= 9) st.drawdown.num9++;
     }
     var sh = it.sharpe;
     if(isNumVal(sh)){ st.sharpe.den++; if(Number(sh) > 1) st.sharpe.num++; }
     var pf = it.profit_factor;
     if(isNumVal(pf)){ st.pf.den++; if(Number(pf) > 2) st.pf.num++; }
+    // FR-avg-hold：平均持股天数分布（每笔成交 卖出日−买入日 的自然日均值，run 级）
+    var hd = it.avg_holding_days;
+    if(isNumVal(hd)){
+      var x = Number(hd);
+      st.hold.sum += x;
+      st.hold.den++;
+      if(x < 20) st.hold.lt20++;
+      else if(x < 40) st.hold.b20_40++;
+      else if(x < 60) st.hold.b40_60++;
+      else st.hold.ge60++;
+    }
   }
   return st;
 }
@@ -1249,15 +1367,22 @@ function renderStrategyStats(items, total, truncated){
     + statItemHtml('胜率 &gt; 50%', st.winRate.num, st.winRate.den)
     + '</div>'
     + '<div class="stat-block"><h3>📉 最大回撤分布（|最大回撤| 阈值）</h3>'
-    + statItemHtml('|最大回撤| ≤ 10%', st.drawdown.num10, st.drawdown.den)
-    + statItemHtml('|最大回撤| ≤ 15%', st.drawdown.num15, st.drawdown.den)
-    + statItemHtml('|最大回撤| ≤ 20%', st.drawdown.num20, st.drawdown.den)
+    + statItemHtml('|最大回撤| ≤ 3%', st.drawdown.num3, st.drawdown.den)
+    + statItemHtml('|最大回撤| ≤ 6%', st.drawdown.num6, st.drawdown.den)
+    + statItemHtml('|最大回撤| ≤ 9%', st.drawdown.num9, st.drawdown.den)
     + '</div>'
     + '<div class="stat-block"><h3>⚡ 夏普比分布</h3>'
     + statItemHtml('夏普比 &gt; 1', st.sharpe.num, st.sharpe.den)
     + '</div>'
     + '<div class="stat-block"><h3>📈 盈亏比分布</h3>'
     + statItemHtml('盈亏比 &gt; 2', st.pf.num, st.pf.den)
+    + '</div>'
+    + '<div class="stat-block"><h3>📅 平均持股天数</h3>'
+    + statMeanHtml(st.hold)
+    + statItemHtml('持股天数 &lt; 20天', st.hold.lt20, st.hold.den)
+    + statItemHtml('20–40天', st.hold.b20_40, st.hold.den)
+    + statItemHtml('40–60天', st.hold.b40_60, st.hold.den)
+    + statItemHtml('≥ 60天', st.hold.ge60, st.hold.den)
     + '</div>';
 }
 
@@ -1271,7 +1396,10 @@ function loadStats(){
   if(curWinRateMin!=='') qs += '&win_rate_min=' + encodeURIComponent(curWinRateMin);
   if(curProfitFactorMin!=='') qs += '&profit_factor_min=' + encodeURIComponent(curProfitFactorMin);
   if(curSharpeMin!=='') qs += '&sharpe_min=' + encodeURIComponent(curSharpeMin);
+  if(curAvgHoldingDaysMax!=='') qs += '&avg_holding_days_max=' + encodeURIComponent(curAvgHoldingDaysMax);
   if(curNameKw) qs += '&name_kw=' + encodeURIComponent(curNameKw);
+  if(curLastOpenFrom!=='') qs += '&last_open_date_min=' + encodeURIComponent(curLastOpenFrom);
+  if(curLastOpenTo!=='') qs += '&last_open_date_max=' + encodeURIComponent(curLastOpenTo);
   var all = [];
   var page = 1;
   var next = function(){
@@ -1308,7 +1436,7 @@ function sortBy(col){
   loadRank(1);
 }
 function headerHtml(){
-  var cols=[['symbol_name','股票名称',true],['total_return_pct','总收益率',true],['max_drawdown_pct','最大回撤',true],['sharpe','夏普',true],['win_rate_pct','胜率',true],['profit_factor','盈亏比',true],['last_open_date','最近建仓',true],['last_t_buy_date','最近做T',true],['','数据时效',false]];
+  var cols=[['symbol_name','股票名称',true],['total_return_pct','总收益率',true],['max_drawdown_pct','最大回撤',true],['sharpe','夏普',true],['win_rate_pct','胜率',true],['profit_factor','盈亏比',true],['avg_holding_days','平均持股天数',true],['last_open_date','最近建仓',true],['last_t_buy_date','最近做T',true],['','数据时效',false]];
   // 构建 key -> {priority, dir} 索引，用于在表头标注组合排序优先级
   var sortIdx={};
   for(var i=0;i<curSortRules.length;i++){ sortIdx[curSortRules[i].key]={pri:i+1, dir:curSortRules[i].dir}; }
@@ -1328,10 +1456,11 @@ function rowHtml(it){
   var sh=it.sharpe==null?'—':Number(it.sharpe).toFixed(2);
   var wr=it.win_rate_pct==null?'—':Number(it.win_rate_pct).toFixed(2)+'%';
   var pf=it.profit_factor==null?'—':Number(it.profit_factor).toFixed(2);
+  var ahd=it.avg_holding_days==null?'—':Number(it.avg_holding_days).toFixed(1)+'天';
   var lod=it.last_open_date==null?'—':it.last_open_date;
   var ltd=it.last_t_buy_date==null?'—':it.last_t_buy_date;
   var stale=it.stale?'<span class="stale">数据较旧，建议点「更新数据源」刷新行情后再重跑</span>':'';
-  return '<tr data-rid="'+it.run_id+'" onclick="openRun(this.dataset.rid)"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+wr+'</td><td>'+pf+'</td><td>'+lod+'</td><td>'+ltd+'</td><td>'+stale+'</td></tr>';
+  return '<tr data-rid="'+it.run_id+'" onclick="openRun(this.dataset.rid)"><td>'+it.symbol_name+'</td><td class="'+cls+'">'+tr+'</td><td>'+dd+'</td><td>'+sh+'</td><td>'+wr+'</td><td>'+pf+'</td><td>'+ahd+'</td><td>'+lod+'</td><td>'+ltd+'</td><td>'+stale+'</td></tr>';
 }
 function openRun(rid){ window.open('/history?run_id='+rid); }
 function exportCsv(){
@@ -1341,22 +1470,32 @@ function exportCsv(){
   if(curWinRateMin!=='') qs+='&win_rate_min='+encodeURIComponent(curWinRateMin);
   if(curProfitFactorMin!=='') qs+='&profit_factor_min='+encodeURIComponent(curProfitFactorMin);
   if(curSharpeMin!=='') qs+='&sharpe_min='+encodeURIComponent(curSharpeMin);
+  if(curAvgHoldingDaysMax!=='') qs+='&avg_holding_days_max='+encodeURIComponent(curAvgHoldingDaysMax);
   if(curNameKw) qs+='&name_kw='+encodeURIComponent(curNameKw);
+  if(curLastOpenFrom!=='') qs+='&last_open_date_min='+encodeURIComponent(curLastOpenFrom);
+  if(curLastOpenTo!=='') qs+='&last_open_date_max='+encodeURIComponent(curLastOpenTo);
   window.open('/api/rank?'+qs);
 }
 function resetFilters(){
   document.getElementById('win-rate-min').value='';
   document.getElementById('profit-factor-min').value='';
   document.getElementById('sharpe-min').value='';
+  document.getElementById('avg-holding-days-max').value='';
   document.getElementById('name-kw').value='';
-  curWinRateMin=''; curProfitFactorMin=''; curSharpeMin=''; curNameKw='';
+  document.getElementById('last-open-from').value='';
+  document.getElementById('last-open-to').value='';
+  curWinRateMin=''; curProfitFactorMin=''; curSharpeMin=''; curAvgHoldingDaysMax=''; curNameKw='';
+  curLastOpenFrom=''; curLastOpenTo='';
   loadRank(1);
 }
 document.getElementById('strategy').addEventListener('change',function(){ loadRank(1); });
 document.getElementById('win-rate-min').addEventListener('change',function(){ loadRank(1); });
 document.getElementById('profit-factor-min').addEventListener('change',function(){ loadRank(1); });
 document.getElementById('sharpe-min').addEventListener('change',function(){ loadRank(1); });
+document.getElementById('avg-holding-days-max').addEventListener('change',function(){ loadRank(1); });
 document.getElementById('name-kw').addEventListener('change',function(){ loadRank(1); });
+document.getElementById('last-open-from').addEventListener('change',function(){ loadRank(1); });
+document.getElementById('last-open-to').addEventListener('change',function(){ loadRank(1); });
 window.addEventListener('DOMContentLoaded', function(){ loadRank(1); });
 </script>
 </body>
@@ -1489,7 +1628,10 @@ class Handler(BaseHTTPRequestHandler):
         win_rate_min = _opt_float((params.get("win_rate_min", [""])[0] or "").strip())
         profit_factor_min = _opt_float((params.get("profit_factor_min", [""])[0] or "").strip())
         sharpe_min = _opt_float((params.get("sharpe_min", [""])[0] or "").strip())
+        avg_holding_days_max = _opt_float((params.get("avg_holding_days_max", [""])[0] or "").strip())
         name_kw = (params.get("name_kw", [""])[0] or "").strip() or None
+        last_open_date_min = (params.get("last_open_date_min", [""])[0] or "").strip() or None
+        last_open_date_max = (params.get("last_open_date_max", [""])[0] or "").strip() or None
         ph = (params.get("params_hash", [""])[0] or "").strip() or None
         export = (params.get("export", [""])[0] or "").strip()
         sort_by = (params.get("sort_by", [""])[0] or "").strip() or None
@@ -1531,6 +1673,8 @@ class Handler(BaseHTTPRequestHandler):
                 sort_by=sort_by, order=order,
                 win_rate_min=win_rate_min, profit_factor_min=profit_factor_min,
                 sharpe_min=sharpe_min, name_kw=name_kw,
+                avg_holding_days_max=avg_holding_days_max,
+                last_open_date_min=last_open_date_min, last_open_date_max=last_open_date_max,
             )
             self._send_csv(_ranks_to_csv(data["items"]), f"rank_{strategy_name}.csv")
             return
@@ -1539,6 +1683,8 @@ class Handler(BaseHTTPRequestHandler):
             sort_by=sort_by, order=order,
             win_rate_min=win_rate_min, profit_factor_min=profit_factor_min,
             sharpe_min=sharpe_min, name_kw=name_kw,
+            avg_holding_days_max=avg_holding_days_max,
+            last_open_date_min=last_open_date_min, last_open_date_max=last_open_date_max,
         )
         if data["total"] == 0:
             latest = storage_repo.latest_batch_for_strategy(strategy_name, ph)
@@ -1951,7 +2097,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _ranks_to_csv(items: list[dict]) -> str:
     """把排名 items 转为 CSV 文本（含 BOM 供 Excel）。"""
-    cols = ["run_id", "symbol", "symbol_name", "total_return_pct", "max_drawdown_pct", "sharpe", "profit_factor", "last_open_date", "last_t_buy_date", "end", "stale"]
+    cols = ["run_id", "symbol", "symbol_name", "total_return_pct", "max_drawdown_pct", "sharpe", "profit_factor", "avg_holding_days", "last_open_date", "last_t_buy_date", "end", "stale"]
     lines = [",".join(cols)]
     for it in items:
         row = [
@@ -1962,6 +2108,7 @@ def _ranks_to_csv(items: list[dict]) -> str:
             "" if it.get("max_drawdown_pct") is None else f"{it['max_drawdown_pct']:.2f}",
             "" if it.get("sharpe") is None else f"{it['sharpe']:.2f}",
             "" if it.get("profit_factor") is None else f"{it['profit_factor']:.2f}",
+            "" if it.get("avg_holding_days") is None else f"{it['avg_holding_days']:.1f}",
             it.get("last_open_date", "") or "",
             it.get("last_t_buy_date", "") or "",
             it.get("end", "") or "",

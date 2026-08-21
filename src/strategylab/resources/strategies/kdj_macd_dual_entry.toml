@@ -12,7 +12,7 @@
 name = "周线MACD + 日线KDJ 双入口做T"
 type = "kdj_macd_dual_entry"
 market = "china_a"
-description = "周线MACD柱<0进入监控区, 动能筑底转强(日线J<50)尾盘建底仓; 持仓期用日线J线做T增厚; 日线MACD水上死叉清仓。"
+description = "周线MACD柱<0进入监控区, 动能筑底转强(日线J<50)尾盘建底仓; 持仓期用日线J线做T增厚; 日线RSI(12)下穿70或收益峰值回撤5%清仓。"
 
 [params]
 initial_cash = 200000          # 初始资金(元)
@@ -46,9 +46,14 @@ j_buy = 50                     # 当日线 J < 此值 尾盘买入底仓
 drop_from_high = 30            # J 较近5日高点回落 >= 此值 且仍在下降 -> 买1W
 j_sell_threshold = 80          # J > 此值 -> 卖光全部加仓部分(底仓不动)
 
-# ---- 清仓 ----
-[params.exit]
-daily_macd_water_death_cross = true  # 日线MACD水上死叉(DIF>0,DEA>0,DIF下穿DEA)清仓
+# ---- 清仓: 日线 RSI(period) 下穿 overbought 清仓 ----
+[params.rsi]
+period = 12
+overbought = 70
+
+# ---- 移动止盈/回撤止损: 持仓期间净值从收益峰值回落 >= 此值 清仓 ----
+[params.trailing_stop]
+peak_drawdown_pct = 0.05
 
 # ---- 风控: 同一时间只持一笔底仓 ----
 [params.single_base_position]

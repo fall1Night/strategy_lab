@@ -811,6 +811,9 @@ def rank_runs(
     profit_factor_min: float | None = None,
     sharpe_min: float | None = None,
     name_kw: str | None = None,
+    avg_holding_days_max: float | None = None,
+    last_open_date_min: str | None = None,
+    last_open_date_max: str | None = None,
 ) -> dict[str, Any]:
     """排名查询（分析页核心）：已落库 run 分页排序，默认按总收益率降序。
 
@@ -821,6 +824,13 @@ def rank_runs(
     - ``sharpe_min``：夏普比下限，None 不筛；仅保留 sharpe 非 None 且 >= 下限的项。
     - ``name_kw``：股票名称模糊关键字（大小写不敏感），None/空 不筛；
       ``symbol_name`` 或 ``symbol`` 包含该关键字即命中。
+    - ``avg_holding_days_max``：平均持股天数上限（自然日，每笔成交按
+      ``exit_date - entry_date`` 求平均），None 不筛；仅保留
+      ``avg_holding_days`` 非 None 且 <= 上限的项（上限外视为不满足，排除）。
+    - ``last_open_date_min`` / ``last_open_date_max``：最近建仓日期区间（ISO ``YYYY-MM-DD``
+      字符串，None/空 不筛）；仅保留 ``last_open_date`` 非 None 且落在闭区间
+      ``[min, max]`` 的项（区间外/None 视为不满足，排除）。字符串字典序比较等价于
+      日期先后，无需解析。
     - ``sort_by``：排序字段白名单 ``symbol_name`` / ``total_return_pct`` /
       ``max_drawdown_pct`` / ``sharpe`` / ``win_rate_pct`` / ``last_open_date`` /
       ``last_t_buy_date`` / ``last_buy_date`` / ``profit_factor``，
@@ -918,6 +928,30 @@ def rank_runs(
         )
         profit_map = {rid: (float(pf) if pf is not None else None) for rid, pf in pf_sub}
 
+        # FR-avg-hold：按 run_id 聚合计算平均持股天数（每笔成交 exit_date - entry_date
+        # 的自然日数，求均值）。一条分组查询（Python 端按 run_id 聚合，避免 DB 方言
+        # DATEDIFF），无 trades 的 run → None。与 profit_factor 同为现算派生指标。
+        hold_map: dict[str, float | None] = {}
+        hold_sub = (
+            s.query(
+                Trade.run_id,
+                Trade.entry_date,
+                Trade.exit_date,
+            )
+            .join(BacktestRun, BacktestRun.run_id == Trade.run_id)
+            .filter(
+                BacktestRun.strategy_name == strategy_name,
+                BacktestRun.params_hash == params_hash,
+            )
+            .all()
+        )
+        _hdays: dict[str, list[int]] = {}
+        for _rid, _ed, _xd in hold_sub:
+            if _ed is not None and _xd is not None:
+                _hdays.setdefault(_rid, []).append((_xd - _ed).days)
+        for _rid, _days in _hdays.items():
+            hold_map[_rid] = sum(_days) / len(_days)
+
         items: list[dict[str, Any]] = []
         today = datetime.date.today()
         for r in all_rows:
@@ -951,6 +985,7 @@ def rank_runs(
                     "last_t_buy_date": tbuy_map.get(r.run_id),  # FR-47：最近做T买入日期（role='做T'，无则为 None）
                     "last_buy_date": buy_map.get(r.run_id),  # FR-43 兼容字段（建仓/做T 较新者，无则为 None）
                     "profit_factor": profit_map.get(r.run_id),  # FR-44：盈亏比（总盈利/总亏损绝对值，全盈利→None）
+                    "avg_holding_days": hold_map.get(r.run_id),  # FR-avg-hold：平均持股天数（自然日，无交易→None）
                     "end": r.end.isoformat() if r.end else None,
                     "stale": stale,
                     "_created_at": r.created_at,  # 去重辅助字段
@@ -990,6 +1025,24 @@ def rank_runs(
                 if (it["symbol_name"] or "").lower().find(_kw) >= 0
                 or (it["symbol"] or "").lower().find(_kw) >= 0
             ]
+        if avg_holding_days_max is not None:
+            items = [
+                it for it in items
+                if it["avg_holding_days"] is not None
+                and it["avg_holding_days"] <= avg_holding_days_max
+            ]
+        if last_open_date_min is not None:
+            items = [
+                it for it in items
+                if it["last_open_date"] is not None
+                and it["last_open_date"] >= last_open_date_min
+            ]
+        if last_open_date_max is not None:
+            items = [
+                it for it in items
+                if it["last_open_date"] is not None
+                and it["last_open_date"] <= last_open_date_max
+            ]
 
         # 排序（在去重+筛选后的 items 上做，支持多键组合排序；None 统一排末尾）
         _ALLOWED_SORT = {
@@ -1002,6 +1055,7 @@ def rank_runs(
             "last_t_buy_date",  # FR-47：最近做T买入日期（NULL 统一排末尾，沿用 FR-20 规则）
             "last_buy_date",  # FR-43 兼容字段：最近买入日期（NULL 统一排末尾）
             "profit_factor",  # FR-44：盈亏比（NULL 统一排末尾，沿用 FR-20 规则）
+            "avg_holding_days",  # FR-avg-hold：平均持股天数（NULL 统一排末尾，沿用 FR-20 规则）
         }
 
         # 解析多键排序规则：sort_by 逗号分隔取前 3 个，order 平行逗号分隔（不足默认 desc）

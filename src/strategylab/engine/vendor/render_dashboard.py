@@ -517,6 +517,41 @@ def _build_drawdown_curve(equity_curve: list[dict[str, Any]]) -> list[dict[str, 
     return drawdown_curve
 
 
+def _max_trade_drawdown_pct(
+    equity_curve: list[dict[str, Any]],
+    trade_history: list[dict[str, Any]] | None,
+) -> float | None:
+    """历史交易记录里的最大单笔回撤占比。
+
+    逐笔交易截取 [entry_date, exit_date] 区间的账户权益曲线，计算该笔持仓内的
+    峰值→谷值回撤（与整条曲线回撤同源：账户权益相对滚动峰值的跌幅 %），
+    再取所有交易中的最大值作为「最大回撤」。某笔区间无效（缺日期 / 不足 2 个
+    数据点）则跳过；无任何有效交易时回退到整条权益曲线的最大回撤。
+    """
+    trades = trade_history or []
+    worst: float | None = None
+    for t in trades:
+        ed = t.get("entry_date")
+        xd = t.get("exit_date")
+        if not ed or not xd:
+            continue
+        seg = [p for p in equity_curve if ed <= str(p.get("date", "")) <= xd]
+        if len(seg) < 2:
+            continue
+        dcurve = _build_drawdown_curve(seg)
+        if not dcurve:
+            continue
+        dd = abs(min(p["drawdown_pct"] for p in dcurve))
+        worst = dd if worst is None else max(worst, dd)
+    if worst is not None:
+        return worst
+    # 回退：整条权益曲线最大回撤（无交易 / 交易区间均无效时）
+    dcurve = _build_drawdown_curve(equity_curve)
+    if dcurve:
+        return abs(min(p["drawdown_pct"] for p in dcurve))
+    return None
+
+
 def _compute_window_summary(
     equity_curve: list[dict[str, Any]],
     trade_history: list[dict[str, Any]],
@@ -544,10 +579,9 @@ def _compute_window_summary(
     total_trades = len(trade_history)
     winning_trades = sum(1 for t in trade_history if (_safe_float(t.get("pnl")) or 0.0) > 0)
     win_rate_pct = winning_trades / total_trades * 100.0 if total_trades else 0.0
-    drawdown_curve = _build_drawdown_curve(equity_curve)
-    max_drawdown_pct = (
-        abs(min(p["drawdown_pct"] for p in drawdown_curve)) if drawdown_curve else None
-    )
+    # 最大回撤改为「历史交易记录里的最大单笔回撤占比」：逐笔持仓区间取峰值→谷值
+    # 回撤，再取所有交易中的最大值；不再使用整条权益曲线的总历史回撤。
+    max_drawdown_pct = _max_trade_drawdown_pct(equity_curve, trade_history)
 
     annual_return_pct = None
     sharpe = None
