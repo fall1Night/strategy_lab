@@ -137,14 +137,19 @@ class KlineCache:
     # ------------------------------------------------------------------
     @staticmethod
     def _covers(meta: dict[str, Any] | None, beg: str, end: str,
-                end_tolerance_days: int = 0) -> bool:
+                end_tolerance_days: int = 0,
+                beg_tolerance_days: int = 0) -> bool:
         """请求区间 [beg, end] 是否 ⊆ 缓存区间 [meta.beg, meta.end]。
 
         beg/end 为 ``'YYYYMMDD'`` 字符串，同格式下字典序比较即时间序。
 
-        新增 ``end_tolerance_days``（FR-55）：快速回测场景下缓存末日永远
-        不可能覆盖"今天"，允许容忍末日落后 ``end`` 最多 N 天。默认 0
-        保持其他调用方语义完全不变。
+        容忍窗口（与 FR-55 末日容差对称）：
+          - ``end_tolerance_days``：快速回测场景下缓存末日永远不可能覆盖
+            "今天"，允许末日落后 ``end`` 最多 N 天（默认 0）。
+          - ``beg_tolerance_days``：缓存首日略晚于请求起点时，允许起点滞后
+            最多 N 天。仅损失少量预热余量（warmup 头部），不影响评估窗口
+            [start, end] 的覆盖；用于消除 GENESIS 与缓存实际首日差 1 天这类
+            边界误判。默认 0 保持其他调用方语义完全不变。
         """
         if not meta:
             return False
@@ -152,7 +157,17 @@ class KlineCache:
         me = meta.get("end")
         if not mb or not me:
             return False
-        if mb > beg:
+        # 起点容差：缓存首日略晚于请求起点时，只要在容忍窗口内即视为覆盖
+        beg_ok = mb <= beg
+        if not beg_ok and beg_tolerance_days > 0:
+            try:
+                beg_dt = datetime.strptime(beg, "%Y%m%d")
+                tol_beg = (beg_dt + timedelta(days=beg_tolerance_days)).strftime("%Y%m%d")
+                if mb <= tol_beg:
+                    beg_ok = True
+            except (ValueError, OverflowError):
+                pass
+        if not beg_ok:
             return False
         if me >= end:
             return True

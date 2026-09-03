@@ -1,0 +1,42 @@
+# =====================================================================
+# 策略配置：指标共振（indicator_combo）
+# ---------------------------------------------------------------------
+# 基于移植的 classic_indicators 指标池 + StopRules 卖出纪律（MIT）。
+# 买入：MACD柱由负转正 + RSI从超卖区回升 + 收盘在MA200上方（三重共振）
+# 卖出：MACD柱转负 或 RSI下穿超买 或 止损纪律触发
+#   - name   : 展示用名称
+#   - type   : 对应 engine/strategies/indicator_combo.py 的 type 字段
+# =====================================================================
+
+name = "指标共振"
+type = "indicator_combo"
+market = "china_a"
+description = "MACD金叉+RSI超卖回升+MA200过滤三重共振买入; MACD死叉/RSI超买/止损纪律卖出; 单笔底仓。"
+
+[params]
+initial_cash = 200000          # 初始资金(元)
+macd_fast = 12                 # MACD 快线
+macd_slow = 26                 # MACD 慢线
+macd_signal = 9                # MACD 信号线
+rsi_period = 14                # RSI 周期
+rsi_oversold = 30              # RSI 超卖阈值（从下方上穿=回升）
+rsi_overbought = 70            # RSI 超买阈值（从上方下穿=回落）
+ma_filter = 200                # 趋势过滤均线（0=关闭）
+signal_window = 3              # 信号共振窗口（近 N 日，MACD金叉与RSI回升无需精确同日）
+buy_ratio = 0.95               # 买入占可用资金比例
+lot_size = 100                 # A股每手股数
+commission = 0.0003            # 佣金(双边, 比例)
+stamp_tax = 0.0005             # 印花税(仅卖方, 比例)
+
+# 卖出纪律（StopRules，可关 enabled=false）
+[params.stop]
+enabled = true
+stop_loss_pct = 0.07           # 硬止损 7%
+stop_loss_below_pivot = 0.08   # 突破点下方 8%
+time_stop_weeks = 3            # 时间止损: 3周涨幅<3%
+time_stop_min_gain = 0.03
+profit_take_low = 0.20         # 止盈 20-25% 分批
+profit_take_high = 0.25
+trailing_stop_ma = 50          # 跌破50日均线
+high_drawdown_exit = 0.08      # 高点回撤 8%
+atr_stop_mult = 2.0            # ATR 止损倍数

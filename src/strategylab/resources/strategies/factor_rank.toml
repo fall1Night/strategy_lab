@@ -1,0 +1,42 @@
+# =====================================================================
+# 策略配置：因子排名择时（factor_rank）
+# ---------------------------------------------------------------------
+# 移植自 deepseek-harness-quant 因子引擎 + 卖出纪律（MIT）。
+# 单标的时序版：因子方向化值的滚动分位作持仓信号，
+#   分位 ≤ entry_pctile（超卖/低估值）→ 买入
+#   分位 ≥ exit_pctile（超买/高估值）→ 卖出
+# 持仓期间挂接 StopRules 卖出纪律（可关）。
+#   - name   : 展示用名称
+#   - type   : 对应 engine/strategies/factor_rank.py 的 type 字段
+#   - market : china_a / us_stock / hong_kong
+# =====================================================================
+
+name = "因子排名择时"
+type = "factor_rank"
+market = "china_a"
+description = "lowvol_60 反转择时: 60日分位≤30%买入, ≥70%卖出; 硬止损7%/移动止损/止盈; 单笔底仓, T+1/整手/前复权。"
+
+[params]
+initial_cash = 200000          # 初始资金(元)
+factor = "lowvol_60"           # 因子（FACTOR_FUNCS: lowvol_60/near_high_250/mom_20/mom_120/rps_120/new_high_250）
+direction = -1                 # 因子方向: +1 正用 / -1 反转（A股实证：低波/动量均为反用）
+lookback = 60                  # 滚动分位窗口(交易日)
+entry_pctile = 0.30            # 分位 ≤ 此值 → 买入
+exit_pctile = 0.70             # 分位 ≥ 此值 → 卖出
+buy_ratio = 0.95               # 买入占可用资金比例
+lot_size = 100                 # A股每手股数
+commission = 0.0003            # 佣金(双边, 比例)
+stamp_tax = 0.0005             # 印花税(仅卖方, 比例)
+
+# 卖出纪律（StopRules，可关 enabled=false）
+[params.stop]
+enabled = true
+stop_loss_pct = 0.07           # 硬止损 7%
+stop_loss_below_pivot = 0.08   # 突破点下方 8%
+time_stop_weeks = 3            # 时间止损: 3周涨幅<3%
+time_stop_min_gain = 0.03
+profit_take_low = 0.20         # 止盈 20-25% 分批
+profit_take_high = 0.25
+trailing_stop_ma = 50          # 跌破50日均线
+high_drawdown_exit = 0.08      # 高点回撤 8%
+atr_stop_mult = 2.0            # ATR 止损倍数

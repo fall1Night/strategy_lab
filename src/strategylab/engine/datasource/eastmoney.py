@@ -105,7 +105,15 @@ class EastmoneyDataSource(DataSource):
                 req, timeout=getattr(self.config, "network_timeout", 30)
             ) as resp:
                 raw = resp.read().decode("utf-8")
-        except Exception as e:  # 网络/HTTP 错误 → 可重试
+        except Exception as e:  # 网络/HTTP 错误
+            from urllib.error import HTTPError  # noqa: PLC0415
+
+            # ★HTTP 4xx（客户端错误，非瞬时）→ 不重试，立即抛出；
+            #   5xx / 网络层异常 → 包装为可重试，让基类退避后重试
+            if isinstance(e, HTTPError) and not (500 <= e.code < 600):
+                raise DataSourceError(
+                    self.name, f"eastmoney HTTP {e.code}（客户端错误，不重试）: {e}"
+                ) from e
             raise RetryableDataSourceError(self.name, f"eastmoney 请求失败(可重试): {e}") from e
         try:
             data = json.loads(raw)

@@ -1,0 +1,50 @@
+# =====================================================================
+# 策略配置：多因子综合择时（factor_multi）
+# ---------------------------------------------------------------------
+# 基于移植的 factor_engine 因子池 + StopRules 卖出纪律（MIT）。
+# 多因子方向化 → 滚动z-score归一 → 等权合成 → 滚动分位进出场。
+#   factors: [{name, sign}]，name 取 FACTOR_FUNCS，sign 遵循实证方向
+#     lowvol_60(-1) rps_120(-1) near_high_250(+1) 为默认"技术三因子"
+# =====================================================================
+
+name = "多因子综合"
+type = "factor_multi"
+market = "china_a"
+description = "低波+相对强度反转+接近高点正用三因子合成, 60日分位≤30%买入≥70%卖出; 止损纪律; 单笔底仓。"
+
+[params]
+initial_cash = 200000          # 初始资金(元)
+buy_ratio = 0.95               # 买入占可用资金比例
+lot_size = 100                 # A股每手股数
+commission = 0.0003            # 佣金(双边, 比例)
+stamp_tax = 0.0005             # 印花税(仅卖方, 比例)
+z_win = 120                    # 因子滚动 z-score 归一化窗口
+lookback = 60                  # 综合分滚动分位窗口
+entry_pctile = 0.30            # 分位 ≤ 此值 → 买入
+exit_pctile = 0.70             # 分位 ≥ 此值 → 卖出
+
+# 因子组合（方向遵循 DEFAULT_DIRECTION 实证：低波/动量反用，接近高点正用）
+[[params.factors]]
+name = "lowvol_60"
+sign = -1
+
+[[params.factors]]
+name = "rps_120"
+sign = -1
+
+[[params.factors]]
+name = "near_high_250"
+sign = 1
+
+# 卖出纪律（StopRules，可关 enabled=false）
+[params.stop]
+enabled = true
+stop_loss_pct = 0.07
+stop_loss_below_pivot = 0.08
+time_stop_weeks = 3
+time_stop_min_gain = 0.03
+profit_take_low = 0.20
+profit_take_high = 0.25
+trailing_stop_ma = 50
+high_drawdown_exit = 0.08
+atr_stop_mult = 2.0

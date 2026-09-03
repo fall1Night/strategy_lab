@@ -35,6 +35,11 @@ from .serializers import db_row_to_result
 # 用于分析页标注「数据较旧」，引导用户先点『更新数据源』刷新行情再重跑。
 STALE_DAYS: int = int(os.environ.get("STRATEGALAB_STALE_DAYS", "30"))
 
+# FR-42 清空重跑：单批次最大 run_id 数，避免一次性删除过多行导致锁等待。
+CLEAR_RUN_CHUNK_SIZE: int = int(
+    os.environ.get("STRATEGALAB_CLEAR_RUN_CHUNK_SIZE", "500")
+)
+
 
 # ---------------------------------------------------------------------------
 # 小工具
@@ -449,6 +454,9 @@ def clear_strategy_runs(
     全部 ``backtest_runs`` 及关联 ``equity_points`` / ``trades`` / ``summary`` /
     ``batch_items``，再全量重跑所选范围。
 
+    为避免一次性删除过多行导致长事务锁等待（MySQL 1205），本函数按
+    ``CLEAR_RUN_CHUNK_SIZE``（默认 500）分批删除并逐批提交，尽早释放锁。
+
     隔离原则：``batches`` / ``batch_items`` 为 data/backtest 共用表，删除 **限定
     ``batch_type='backtest'``**，绝不波及「更新数据源」写入的 data 批次与缓存 CSV。
 
@@ -473,34 +481,46 @@ def clear_strategy_runs(
         run_ids = [r.run_id for r in runs]
         if not run_ids:
             return 0
-        # 顺序 DELETE 关联明细（避免外键约束 / 触发器问题）
-        s.query(EquityPoint).filter(EquityPoint.run_id.in_(run_ids)).delete(
-            synchronize_session=False
-        )
-        s.query(PricePoint).filter(PricePoint.run_id.in_(run_ids)).delete(
-            synchronize_session=False
-        )
-        s.query(Trade).filter(Trade.run_id.in_(run_ids)).delete(
-            synchronize_session=False
-        )
-        s.query(Summary).filter(Summary.run_id.in_(run_ids)).delete(
-            synchronize_session=False
-        )
-        # batch_items：仅删命中 run 的（data 批次 run_id 为 NULL，天然不受影响）；
-        # 额外限定 batch_type='backtest' 作双保险，避免误删 data 批次。
-        s.query(BatchItem).filter(
-            BatchItem.run_id.in_(run_ids),
-            BatchItem.batch_id.in_(
-                s.query(Batch.batch_id).filter(Batch.batch_type == "backtest")
-            ),
-        ).delete(synchronize_session=False)
-        # 删除 backtest_runs 主行
-        n = (
-            s.query(BacktestRun)
-            .filter(BacktestRun.run_id.in_(run_ids))
-            .delete(synchronize_session=False)
-        )
-        return int(n)
+
+    total_deleted = 0
+    chunk_size = max(1, CLEAR_RUN_CHUNK_SIZE)
+
+    with get_session() as s:
+        for i in range(0, len(run_ids), chunk_size):
+            chunk = run_ids[i : i + chunk_size]
+
+            # 顺序 DELETE 关联明细（避免外键约束 / 触发器问题）
+            s.query(EquityPoint).filter(EquityPoint.run_id.in_(chunk)).delete(
+                synchronize_session=False
+            )
+            s.query(PricePoint).filter(PricePoint.run_id.in_(chunk)).delete(
+                synchronize_session=False
+            )
+            s.query(Trade).filter(Trade.run_id.in_(chunk)).delete(
+                synchronize_session=False
+            )
+            s.query(Summary).filter(Summary.run_id.in_(chunk)).delete(
+                synchronize_session=False
+            )
+            # batch_items：仅删命中 run 的（data 批次 run_id 为 NULL，天然不受影响）；
+            # 额外限定 batch_type='backtest' 作双保险，避免误删 data 批次。
+            s.query(BatchItem).filter(
+                BatchItem.run_id.in_(chunk),
+                BatchItem.batch_id.in_(
+                    s.query(Batch.batch_id).filter(Batch.batch_type == "backtest")
+                ),
+            ).delete(synchronize_session=False)
+            # 删除 backtest_runs 主行
+            n = (
+                s.query(BacktestRun)
+                .filter(BacktestRun.run_id.in_(chunk))
+                .delete(synchronize_session=False)
+            )
+            total_deleted += int(n)
+            # 逐批提交：缩小单事务持有锁的范围与时间，降低并发插入冲突概率。
+            s.commit()
+
+    return total_deleted
 
 
 # ---------------------------------------------------------------------------

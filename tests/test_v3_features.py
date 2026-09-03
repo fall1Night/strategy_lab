@@ -188,11 +188,13 @@ def test_ensure_data_update_interval_is_last_plus_one_to_today(monkeypatch):
     cache = KlineCache()
     stale = pd.DataFrame(
         {
-            "date": ["2022-01-01", "2023-01-01"],
+            # first=20200101 与 genesis 对齐 → 不触发"往前补"，仅验证"往后补 last+1"
+            "date": pd.to_datetime(["2020-01-01", "2023-01-01"]),
             "open": [1.0, 1.0],
             "high": [1.0, 1.0],
             "low": [1.0, 1.0],
             "close": [1.0, 1.0],
+            "vol": [1000.0, 1000.0],  # v3：缺 vol 会触发强制全量重拉
         }
     )
     cache.merge(spec, eff, "daily", stale, out)
@@ -213,14 +215,22 @@ def MagicMock_side_effect_capture(captured: list) -> object:
 
     def fake(symbol, spec, period, beg, end, lmt):
         captured.append((period, beg, end))
-        return pd.DataFrame(
-            {
-                "date": ["2022-01-01", "2023-01-01"],
-                "open": [1.0, 1.0],
-                "high": [1.0, 1.0],
-                "low": [1.0, 1.0],
-                "close": [1.0, 1.0],
-            }
+        # 代码已升级：_try_fetch 返回 (df, source_name) 二元组；
+        # source 须等于生效源，否则上层走"容灾切换"分支写错文件
+        eff = provider_mod.get_provider()._factory.get_effective_source(symbol)
+        return (
+            pd.DataFrame(
+                {
+                    # first=20200101 与 genesis 对齐 → 不触发"往前补"，仅"往后补 last+1"
+                    "date": pd.to_datetime(["2020-01-01", "2023-01-01"]),
+                    "open": [1.0, 1.0],
+                    "high": [1.0, 1.0],
+                    "low": [1.0, 1.0],
+                    "close": [1.0, 1.0],
+                    "vol": [1000.0, 1000.0],  # v3：缺 vol 会触发强制全量重拉
+                }
+            ),
+            eff,
         )
 
     return MagicMock(side_effect=fake)

@@ -1,0 +1,42 @@
+# =====================================================================
+# 策略配置：Regime 择时门控（regime_trend）
+# ---------------------------------------------------------------------
+# 基于移植的 regime.RegimeDetector 五档状态机 + StopRules 卖出纪律（MIT）。
+# 仅 强上升/上升波动 持仓；震荡/下跌/恐慌 空仓；状态切换时买卖。
+# ★局限：单标的回测用标的自身日线近似市场状态（无指数），组合级应接真实指数。
+# =====================================================================
+
+name = "Regime择时门控"
+type = "regime_trend"
+market = "china_a"
+description = "Regime五档状态机门控: 仅强上升/上升波动持仓, 震荡/下跌/恐慌空仓; 止损纪律兜底; 单笔底仓。"
+
+[params]
+initial_cash = 200000          # 初始资金(元)
+buy_ratio = 0.95               # 买入占可用资金比例
+lot_size = 100                 # A股每手股数
+commission = 0.0003            # 佣金(双边, 比例)
+stamp_tax = 0.0005             # 印花税(仅卖方, 比例)
+
+# Regime 状态机参数
+[params.regime]
+confirm_days = 3               # 连续 N 天确认才切换（3快/5稳）
+cooldown_days = 5              # 切换后冷却期（交易日），防 whipsaw
+ma_fast = 50                   # 快均线
+ma_slow = 200                  # 慢均线
+adx_window = 14                # ADX 窗口
+vol_window = 60                # 年化波动率窗口
+crisis_vol = 0.30              # 危机波动率阈值（年化30%）
+
+# 卖出纪律（StopRules，可关 enabled=false）
+[params.stop]
+enabled = true
+stop_loss_pct = 0.07
+stop_loss_below_pivot = 0.08
+time_stop_weeks = 3
+time_stop_min_gain = 0.03
+profit_take_low = 0.20
+profit_take_high = 0.25
+trailing_stop_ma = 50
+high_drawdown_exit = 0.08
+atr_stop_mult = 2.0

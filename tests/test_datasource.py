@@ -250,7 +250,8 @@ class TestEastmoneyAdapter:
 
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 2
-        assert list(df.columns) == ["date", "open", "close", "high", "low"]
+        # 代码 v3：K 线解析已包含成交量 vol 列
+        assert list(df.columns) == ["date", "open", "close", "high", "low", "vol"]
         assert df.iloc[0]["date"] == "20230101"
         assert df.iloc[0]["close"] == 10.5
 
@@ -325,9 +326,9 @@ class TestEastmoneyAdapter:
     @patch("urllib.request.urlopen")
     def test_circuit_breaker_resets_on_success(self, mock_urlopen: MagicMock) -> None:
         """一次成功取数后熔断状态复位。"""
-        # 先连续失败 4 次（未到 8 次）
+        # 先连续失败 2 次（未到 3 次熔断阈值）
         mock_urlopen.side_effect = ConnectionError("模拟连接失败")
-        for _ in range(4):
+        for _ in range(2):
             with pytest.raises(Exception):
                 self.ds.fetch_kline("600216.SH", "101", "20230101", "20230102",
                                       attempts=1, base_delay=0.01)
@@ -335,7 +336,7 @@ class TestEastmoneyAdapter:
         # 验证已 degraded
         health = self.ds.health()
         assert health.status == "degraded"
-        assert health.consecutive_failures == 4
+        assert health.consecutive_failures == 2
 
         # 然后成功一次
         mock_resp = MagicMock()
@@ -429,14 +430,14 @@ class TestEastmoneyAdapter:
     def test_health_status_degraded(self, mock_urlopen: MagicMock) -> None:
         """部分失败但未熔断时健康度为 degraded。"""
         mock_urlopen.side_effect = ConnectionError("失败")
-        for _ in range(3):
+        for _ in range(2):  # 2 次失败未达 3 次熔断阈值
             with pytest.raises(Exception):
                 self.ds.fetch_kline("600216.SH", "101", "20230101", "20230102",
                                       attempts=1, base_delay=0.01)
 
         health = self.ds.health()
         assert health.status == "degraded"
-        assert health.consecutive_failures == 3
+        assert health.consecutive_failures == 2
 
 
 # ===================================================================
@@ -455,7 +456,8 @@ class TestDataSourceConfig:
         assert cfg.default_source == "eastmoney"
         assert cfg.cb_enabled is True
         assert cfg.failover_enabled is True
-        assert cfg.min_fetch_gap == 0.3
+        # 防封增强：默认限频间隔已从 0.3s 收紧到 2.0s
+        assert cfg.min_fetch_gap == 2.0
         assert cfg.tushare_token is None
         assert cfg.symbol_overrides == {}
         assert cfg.fallback_order == []
@@ -673,7 +675,8 @@ class TestKlineCacheKey:
         assert meta["source"] == "eastmoney"
         assert meta["beg"] == "20230101"
         assert meta["end"] == "20230102"
-        assert meta["version"] == 2
+        # 代码 v3：meta 格式已升级（含 vol 等字段）
+        assert meta["version"] == 3
 
     def test_load_new_format(self) -> None:
         """load() 可读取新格式缓存。"""

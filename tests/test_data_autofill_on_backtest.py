@@ -59,7 +59,10 @@ def _make_fetch_mock(captured: list | None = None) -> MagicMock:
     def fake(symbol, spec, period, beg, end, lmt):
         if captured is not None:
             captured.append((period, beg, end))
-        return _stub_df(beg, end)
+        # 代码已升级：_try_fetch 返回 (df, source_name) 二元组；
+        # source 必须等于生效源，否则上层走"容灾切换"分支写错文件
+        eff = provider_mod.get_provider()._factory.get_effective_source(symbol)
+        return _stub_df(beg, end), eff
 
     return MagicMock(side_effect=fake)
 
@@ -146,7 +149,8 @@ class TestEnsureDataFrontFill:
             json.dumps(daily_meta, ensure_ascii=False), encoding="utf-8"
         )
         (out / f"{PREFIX}_{eff}_daily.csv").write_text(
-            "date,open,high,low,close\n2022-07-06,10,12,9,11\n", encoding="utf-8"
+            # 代码 v3：CSV 需含 vol 列，否则触发"vol 缺失强制全量重拉"分支
+            "date,open,high,low,close,vol\n2022-07-06,10,12,9,11,1000\n", encoding="utf-8"
         )
 
         # 写周线缓存：已最新（last==today）→ 应被跳过，聚焦于日线往前补回归
@@ -162,7 +166,7 @@ class TestEnsureDataFrontFill:
             json.dumps(weekly_meta, ensure_ascii=False), encoding="utf-8"
         )
         (out / f"{PREFIX}_{eff}_weekly.csv").write_text(
-            "date,open,high,low,close\n2017-12-01,10,12,9,11\n", encoding="utf-8"
+            "date,open,high,low,close,vol\n2017-12-01,10,12,9,11,1000\n", encoding="utf-8"
         )
 
         # 模拟回测失败后调用的 update：日线要 2019 起点
@@ -235,7 +239,8 @@ class TestBacktestVerifyThenUpdate:
 
         dummy_bars = pd.DataFrame(
             {
-                "date": ["2023-01-01", "2023-06-01", "2024-01-01"],
+                # 与真实 load_bars（parse_dates=["date"]）行为一致：date 为 datetime
+                "date": pd.to_datetime(["2023-01-01", "2023-06-01", "2024-01-01"]),
                 "open": [10.0, 11.0, 12.0],
                 "high": [12.0, 13.0, 14.0],
                 "low": [9.0, 10.0, 11.0],

@@ -182,13 +182,15 @@ def _is_retryable_network_error(exc: BaseException) -> bool:
         (ConnectionError, TimeoutError, socket.timeout, http.client.RemoteDisconnected),
     ):
         return True
+    # ★HTTPError 是 URLError 子类，必须先判断 HTTPError（否则 URLError 分支会拦截，
+    #   导致 5xx 永远被判为不可重试——历史 bug）
+    if isinstance(exc, HTTPError):
+        return 500 <= getattr(exc, "code", 0) < 600
     if isinstance(exc, URLError):
         return isinstance(
             exc.reason,
             (ConnectionError, TimeoutError, socket.timeout, http.client.RemoteDisconnected),
         )
-    if isinstance(exc, HTTPError):
-        return 500 <= getattr(exc, "code", 0) < 600
     return False
 
 
