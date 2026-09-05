@@ -20,3 +20,13 @@
 - **板块码前缀规则**：`data_sector` 取成分股/子行业时，申万一级用 `sw1_pt01801050`（有色金属），申万二级必须带 `sw2_` 前缀（如 `sw2_pt01801053` 贵金属）；裸码 `pt01801053` 会报 service error。
 - **有效排行指标（tool_ranking metric）**：CompScore/FunmScore/RiskScore/TecScore/CapScore（评分组）；fin_profit(盈利/RoeTTM)/fin_growth(成长/营收增速)/fin_valuation(估值/PE_TTM)/fin_cash_size/fin_liquidity/fin_operation/fin_pershare（财务排行组）。`PE`/`DividendYield` 不是合法 metric 名。
 - `data_quote` 支持 `codes` 逗号批量，返回现价/pe_ratio/pe_fwd/pb_ratio/dividend_ratio_ttm/total_market_cap/high_52week/low_52week/chg_ytd 等，可直接锚定目标价。
+
+## 策略落地与回测自检流程（trend_pullback 经验沉淀）
+- **新增策略 SOP（按现有框架）**：①在 `src/strategylab/engine/strategies/<name>.py` 写 `BaseStrategy` 子类并设 `type`，无需手写注册（`discover_strategies()` 自动扫）；②`src/strategylab/resources/strategies/<name>.toml` 放参数（toml 注释支持好）；③docs/ 写规则说明，把口语逐条映射为量化条件并标注"量化假设/直接可译"；④产出三件套走项目自带 `vendor.export_results(write_files=True, output_dir=...)` 写本地 CSV，**不要**依赖 `run_symbol`（它要联网 ensure_data + MySQL 落库，验证脚本自加载本地 akshare CSV 更稳）。
+- **期末强平必须在评估窗口内**：**教训**——原 `trend_pullback.py` 期末强平取 `daily.iloc[-1]`，当数据末日 > eval_end 时会把成交记到窗口外、被 export slice 误删。修复：从右往左找 `eval_start <= ts <= eval_end and not pd.isna(close)` 的最后一根 bar 强平。**适用所有策略**。
+- **描述方法 `describe(params)` 静态**：项目现有惯例，UI 用它呈现策略摘要，注意 `pf/mj/en/ex` 都需从 params 兜底 `dict.get(...) or {}`，否则 NameError。
+- **自检 4 步硬规则**（项目里几乎没有现成测试，靠写"_"开头临时脚本验证）：①`grep "shift(-" "iloc\[i+"` 必须空（防未来函数）；②`merge_asof direction="backward"`（不是 forward，否则泄露未收盘周线）；③交易明细手核 PnL：用 `trading_cost.buy_cash_out`/`sell_cash_in` 重算，对得上；④buy&hold 对照差距 >10x 必查原因（持仓/口径/数据完整性）。
+- **回测—buy&hold 跑赢 ≠ bug**：低吸/趋势策略天然吃不满涨幅，主要看是否**控回撤**与**纪律性**。判读时给"策略吃不满主升 = 它承诺的不做下降趋势反弹"作为价值，但要诚实说择时 alpha 可能是负。
+- **本地 akshare 缓存命名**：`<code>_<sh|sz>_akshare_daily.csv` + `<code>_<sh|sz>_akshare_weekly.csv`（**不是** `<code>_daily.csv` 的统一格式）。akshare 数据从 2020-01 起，前复权 qfq，已含 `vol`（成交量，未含 amount）。
+- **项目 vendor 与 expert reference 同构**：`src/strategylab/engine/vendor/{export_results.py, render_dashboard.py, dashboard_template.html, dashboard_locales.py}` 即 expert `reference/` 同名物——回测/仪表盘可直接 `from strategylab.engine.vendor import render_dashboard as rd` 复用，无需自造 HTML。多标的口径：每个标的跑 export 产出独立三件套 → 自建 `combo_equity` 等权 → 调 `rd.build_dashboard_data(equity_curve=combo, summary=..., meta=..., language="zh")` 拿合规骨架 → **`report_data["modules"] = 自定义模块列表`** 整体替换（避免默认 trades_table 空表 + markers 乱画）。
+- **headless Chrome 截图自检（Windows）**：`chrome.exe --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1680,5200 --user-data-dir=<profile> --virtual-time-budget=20000 --screenshot=<abs path> file:///<html>`。**关键**：`--screenshot` 必须给**绝对 Windows 路径**，相对路径会被无声丢弃；`--user-data-dir` 必须存在否则报 profile 错；`--virtual-time-budget` 给足让图表（Chart.js）渲染完。渲染完 `--user-data-dir` 目录可删（临时）。
